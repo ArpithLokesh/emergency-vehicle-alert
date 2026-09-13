@@ -84,7 +84,7 @@ silently updating docs.
 
 ## MVP Roadmap
 
-- [ ] **MVP-0 — Domain skeleton.** `Vehicle`, `Lamppost`, `TrafficSignal` as CRUD-able JPA entities. No trips, no routing. Demo: boot app, CRUD via REST/Postman, geometry columns round-trip correctly in Postgres.
+- [x] **MVP-0 — Domain skeleton.** `Vehicle`, `Lamppost`, `TrafficSignal` as CRUD-able JPA entities. No trips, no routing. Demo: boot app, CRUD via REST/Postman, geometry columns round-trip correctly in Postgres.
 - [ ] **MVP-1 — Trip creation + OSRM routing + caching.** Dispatcher creates a trip (vehicle + origin + destination); backend calls OSRM, stores route geometry. OSRM responses cached via Caffeine, keyed on (origin, destination, vehicle profile), long TTL (~24h, size-bounded) since a route between two fixed points doesn't go stale. Device-along-route spatial query also lands here (part of route storage). Demo: route returned and visualizable (Postman/QGIS/simple map).
 - [ ] **MVP-2 — Simulated position feed + live ETA.** Starting a trip kicks off a background simulator advancing a virtual vehicle along the route every few seconds. ETA to each upstream device recomputes live. Demo: shrinking ETAs as the simulated vehicle approaches devices.
 - [ ] **MVP-3 — Alerting + signal preemption, with audit trail.** Crossing the (still-hardcoded) threshold triggers lamppost alert / signal force-green, observable via a per-device "pending instructions" endpoint + history of triggered alerts and forced/reverted signals. **Decide alert transport mechanism here.** First true end-to-end demo of the product concept.
@@ -117,14 +117,14 @@ across layered `controller/`/`service/`/`repository/` packages.
 
 ## Current status
 
-Working on: **MVP-0**. Design done (HLD v1.0.0 + full data model LLD in
-`docs/mvp-0/`). Infra verified: Postgres+PostGIS (`evas-postgres`) and
-RabbitMQ (`evas-rabbitmq`) running in Docker, Flyway applying migrations
-cleanly. **Entities implemented**: `Vehicle` (`com.evas.vehicle`), `Lamppost`
-+ `TrafficSignal` (`com.evas.device`), with repositories, migrated by
-`V1__create_vehicle_and_device_tables.sql` — Hibernate `ddl-auto=validate`
-confirms entities match the schema exactly.
+**MVP-0 is complete.** Entities, repositories, and REST controllers for
+`Vehicle`, `Lamppost`, `TrafficSignal` are implemented and verified
+end-to-end with curl (CRUD + validation/conflict/not-found error paths).
+Migration `V1` applied, Hibernate `ddl-auto=validate` confirms it matches
+the entities exactly. Infra verified: Postgres+PostGIS (`evas-postgres`) and
+RabbitMQ (`evas-rabbitmq`) running in Docker.
 
-**Next when picking this back up**: MVP-0's REST layer (controllers + DTOs
-per the REST contracts in `docs/mvp-0/LLD-data-model.md`) — not built yet.
-After that, MVP-0 is demoable and MVP-1 (Trip + OSRM routing) can start.
+**Next**: MVP-1 — Trip creation + OSRM routing + Caffeine caching. This is
+also where the "devices along this route" spatial query gets built (in
+`LamppostRepository`/routing service, per the design note added to
+`docs/mvp-0/LLD-data-model.md`).

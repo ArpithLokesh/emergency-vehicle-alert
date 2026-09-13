@@ -1,10 +1,13 @@
 # LLD: MVP-0 Data Model
 
 **HLD version this was written against:** 1.0.0 (`docs/mvp-0/HLD.md`)
-**Status:** `Vehicle`, `Lamppost`, `TrafficSignal` implemented — migration
-`V1` applied and validated against the entity classes (Hibernate
-`ddl-auto=validate` passes clean). `LamppostAlert`/`SignalPreemption` remain
-design-only until `Trip` exists (MVP-1/MVP-3).
+**Status:** MVP-0 fully implemented — entities, repositories, and REST
+controllers for `Vehicle`, `Lamppost`, `TrafficSignal`, migration `V1`
+applied and validated (Hibernate `ddl-auto=validate` passes clean). All
+CRUD endpoints verified end-to-end with curl, including validation (400),
+duplicate-key conflicts (409), and not-found (404) paths.
+`LamppostAlert`/`SignalPreemption` remain design-only until `Trip` exists
+(MVP-1/MVP-3).
 
 **Interactive schema reference**: [EVAS Schema Explorer](https://claude.ai/code/artifact/75cdb05e-04c4-4ca5-9b4e-b76d3b1cd5ef)
 — click-through ER diagram covering all six tables (private Claude artifact,
@@ -201,6 +204,36 @@ for Postgres-specific support. Confirmed working: Flyway now creates its
 Migration SQL: `V1__create_vehicle_and_device_tables.sql` written by Claude
 and applied — see Code Ownership below for why.
 
+## REST Layer
+
+Implemented directly on the repositories — no service layer for MVP-0,
+since there's no business logic yet beyond persistence (a pass-through
+service would just be an extra layer doing nothing). A service layer
+appears the moment real rules exist, e.g. Trip's "vehicle must be
+AVAILABLE" check in MVP-1 — that logic belongs to Trip, not Vehicle.
+
+- **DTOs are Java records**, not classes — immutable, no boilerplate
+  getters/constructors needed. Separate `*CreateRequest` (validated, all
+  fields required) and `*UpdateRequest` (all fields nullable — null means
+  "leave unchanged", which is why `active` is boxed `Boolean` not primitive
+  `boolean`) per entity, plus a `*Response` with a static `from(entity)`
+  factory.
+- **`GeoPointDto`** (`com.evas.common`) is the shared `{lat, lng}` shape
+  used by both `Lamppost` and `TrafficSignal`. `GeoPoints.fromDto`/`toDto`
+  convert to/from the JTS `Point` the entities actually store. Nested
+  validation requires `@Valid` on the field where `GeoPointDto` is embedded
+  in a create request, or its own `@NotNull`/`@DecimalMin`/`@DecimalMax`
+  constraints are silently skipped.
+- **Errors** go through one `@RestControllerAdvice`
+  (`GlobalExceptionHandler`) rather than per-controller try/catch, returning
+  Spring's built-in `ProblemDetail` (RFC 7807) for a consistent JSON error
+  shape: `NotFoundException` → 404, bean-validation failures → 400,
+  unique-constraint violations (`DataIntegrityViolationException`) → 409.
+- **Verified end-to-end** with curl against the real Postgres/PostGIS
+  instance: create/list/get/patch for all three entities, lat/lng round-trip
+  through the geometry column with no axis swap, plus all three error paths
+  (400/404/409) including nested `location.lat` validation.
+
 ## Code Ownership
 
 **Revised.** Claude writes the code — entities, repositories, migrations,
@@ -219,3 +252,4 @@ not hand-typing boilerplate.
 | 2026-09-14 | Fixed Flyway dependency: swapped raw `flyway-core`/`flyway-database-postgresql` for `spring-boot-starter-flyway` (+ `flyway-database-postgresql`). Confirmed Flyway now actually runs on boot. | Spring Boot 4's modularized autoconfiguration meant the raw library alone silently didn't wire up — no error, no logs, IntelliJ couldn't resolve `spring.flyway.*` properties either. |
 | 2026-09-14 | Consolidated from three separate per-entity files (`LLD-vehicle.md`, `LLD-lamppost.md`, `LLD-traffic-signal.md`) into this single data-model doc. | User preference: one LLD per model/db design area rather than one per entity. |
 | 2026-09-14 | Implemented `Vehicle`/`VehicleType`/`VehicleStatus`/`VehicleRepository` (`com.evas.vehicle`) and `Lamppost`/`LamppostRepository`/`TrafficSignal`/`TrafficSignalRepository` (`com.evas.device`). Migration `V1` applied and validated clean against the entities (`ddl-auto=validate`). Code-ownership note revised: Claude now writes entity/repo code. | Design phase complete; matches the revised code-ownership workflow. |
+| 2026-09-14 | Implemented REST layer: DTOs + controllers for all three entities, `GeoPointDto`/`GeoPoints` conversion, `GlobalExceptionHandler` with `ProblemDetail`. Verified end-to-end with curl (CRUD + 400/404/409 paths). MVP-0 is now fully done and demoable. | Completes MVP-0 per the roadmap. |
