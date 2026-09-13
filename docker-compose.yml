@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgis/postgis:16-3.4-alpine
+    container_name: evas-postgres
+    environment:
+      POSTGRES_DB: evas
+      POSTGRES_USER: evas
+      POSTGRES_PASSWORD: evas
+    ports:
+      - "5432:5432"
+    volumes:
+      - evas-pgdata:/var/lib/postgresql/data
+
+volumes:
+  evas-pgdata:

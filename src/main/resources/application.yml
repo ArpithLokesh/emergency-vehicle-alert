@@ -1,0 +1,24 @@
+spring:
+  application:
+    name: emergency-vehicle-alert
+
+  datasource:
+    url: jdbc:postgresql://localhost:5432/evas
+    username: evas
+    password: evas
+
+  jpa:
+    hibernate:
+      # 'update' auto-adjusts tables to match our @Entity classes as we build.
+      # Fine for a college project's dev loop; a real production app would use
+      # versioned migrations (Flyway/Liquibase) instead.
+      ddl-auto: update
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+
+routing:
+  # Public demo OSRM server, car profile. We'll switch to a self-hosted
+  # instance later if the public one rate-limits us.
+  osrm-base-url: https://router.project-osrm.org
