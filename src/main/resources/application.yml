@@ -9,14 +9,18 @@ spring:
 
   jpa:
     hibernate:
-      # 'update' auto-adjusts tables to match our @Entity classes as we build.
-      # Fine for a college project's dev loop; a real production app would use
-      # versioned migrations (Flyway/Liquibase) instead.
-      ddl-auto: update
+      # Flyway owns the schema now (see spring.flyway below and
+      # src/main/resources/db/migration/) — Hibernate only validates that
+      # our @Entity classes match what Flyway created, it never generates DDL.
+      ddl-auto: none
     show-sql: true
     properties:
       hibernate:
         format_sql: true
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
 
 routing:
   # Public demo OSRM server, car profile. We'll switch to a self-hosted

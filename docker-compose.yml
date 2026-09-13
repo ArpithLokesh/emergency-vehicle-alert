@@ -11,5 +11,18 @@ services:
     volumes:
       - evas-pgdata:/var/lib/postgresql/data
 
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: evas-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: evas
+      RABBITMQ_DEFAULT_PASS: evas
+    ports:
+      - "5672:5672"   # AMQP
+      - "15672:15672" # management UI, http://localhost:15672
+    volumes:
+      - evas-rabbitmq-data:/var/lib/rabbitmq
+
 volumes:
   evas-pgdata:
+  evas-rabbitmq-data:
