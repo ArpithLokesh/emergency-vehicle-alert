@@ -24,5 +24,16 @@ spring:
 
 routing:
   # Public demo OSRM server, car profile. We'll switch to a self-hosted
-  # instance later if the public one rate-limits us.
+  # instance later if the public one rate-limits us — that's a config
+  # change here, not a code change (see RoutingProperties).
   osrm-base-url: https://router.project-osrm.org
+  profile: driving
+  connect-timeout: 5s
+  read-timeout: 5s
+
+caching:
+  osrm-routes:
+    # A route between two fixed points never goes stale, so a long TTL is
+    # safe — size-bounded so the cache can't grow unbounded under load.
+    maximum-size: 500
+    expire-after-write: 24h

@@ -73,7 +73,10 @@ docs/
   mvp-0/
     HLD.md              — versioned (starts 1.0.0), whole-system design + changelog
     LLD-data-model.md   — all MVP-0 entities (Vehicle, Lamppost, LamppostAlert, TrafficSignal) in one doc
-  mvp-1/ (etc., created as each stage is designed)
+  mvp-1/
+    HLD.md                    — delta from mvp-0 (v1.1.0): Trip + Routing + Caching, corrects mvp-0's device-along-route timing
+    LLD-trip-and-routing.md   — Trip entity, TripService, RoutingService, CacheConfig
+  mvp-2/ (etc., created as each stage is designed)
 FUTURE_UPGRADES.md       — backlog of deferred-but-planned ideas (project root)
 ```
 
@@ -85,7 +88,7 @@ silently updating docs.
 ## MVP Roadmap
 
 - [x] **MVP-0 — Domain skeleton.** `Vehicle`, `Lamppost`, `TrafficSignal` as CRUD-able JPA entities. No trips, no routing. Demo: boot app, CRUD via REST/Postman, geometry columns round-trip correctly in Postgres.
-- [ ] **MVP-1 — Trip creation + OSRM routing + caching.** Dispatcher creates a trip (vehicle + origin + destination); backend calls OSRM, stores route geometry. OSRM responses cached via Caffeine, keyed on (origin, destination, vehicle profile), long TTL (~24h, size-bounded) since a route between two fixed points doesn't go stale. Device-along-route spatial query also lands here (part of route storage). Demo: route returned and visualizable (Postman/QGIS/simple map).
+- [x] **MVP-1 — Trip creation + OSRM routing + caching.** Dispatcher creates a trip (vehicle + origin + destination); backend calls OSRM, stores route geometry. OSRM responses cached via Caffeine, keyed on (origin, destination) — no vehicle-profile dimension, that was speculative scope. Device-along-route spatial query deferred to MVP-3 (nothing consumes it until Alerting exists). Demo: route returned and visualizable — verified with real OSRM calls against real Bengaluru coordinates.
 - [ ] **MVP-2 — Simulated position feed + live ETA.** Starting a trip kicks off a background simulator advancing a virtual vehicle along the route every few seconds. ETA to each upstream device recomputes live. Demo: shrinking ETAs as the simulated vehicle approaches devices.
 - [ ] **MVP-3 — Alerting + signal preemption, with audit trail.** Crossing the (still-hardcoded) threshold triggers lamppost alert / signal force-green, observable via a per-device "pending instructions" endpoint + history of triggered alerts and forced/reverted signals. **Decide alert transport mechanism here.** First true end-to-end demo of the product concept.
 - [ ] **MVP-4 — Auth & roles.** Login required; `DISPATCHER` vs `TRAFFIC_AUTHORITY_ADMIN`. Device-facing endpoints get separate device-credential auth (never reuse a user token for device commands).
@@ -117,14 +120,20 @@ across layered `controller/`/`service/`/`repository/` packages.
 
 ## Current status
 
-**MVP-0 is complete.** Entities, repositories, and REST controllers for
-`Vehicle`, `Lamppost`, `TrafficSignal` are implemented and verified
-end-to-end with curl (CRUD + validation/conflict/not-found error paths).
-Migration `V1` applied, Hibernate `ddl-auto=validate` confirms it matches
-the entities exactly. Infra verified: Postgres+PostGIS (`evas-postgres`) and
-RabbitMQ (`evas-rabbitmq`) running in Docker.
+**MVP-0 and MVP-1 are complete.**
 
-**Next**: MVP-1 — Trip creation + OSRM routing + Caffeine caching. This is
-also where the "devices along this route" spatial query gets built (in
-`LamppostRepository`/routing service, per the design note added to
-`docs/mvp-0/LLD-data-model.md`).
+MVP-0: entities, repositories, and REST controllers for `Vehicle`,
+`Lamppost`, `TrafficSignal`, verified end-to-end with curl.
+
+MVP-1: `Trip` + `TripService` + `TripController` + `RoutingService` +
+Caffeine caching, migration `V2` applied. Verified end-to-end: real OSRM
+routing against real coordinates, one-active-trip-per-vehicle rejection
+(app + DB level), cancel flow (frees the vehicle), cache-hit timing
+(~15ms cached vs ~2s fresh), and OSRM-failure fail-fast behavior (502,
+nothing persisted). See `docs/mvp-1/` for the full design record.
+
+Infra verified: Postgres+PostGIS (`evas-postgres`) and RabbitMQ
+(`evas-rabbitmq`) running in Docker.
+
+**Next**: MVP-2 — simulated position feed + live ETA-to-device
+recalculation.

@@ -1,7 +1,10 @@
 package com.evas.common;
 
+import java.util.Arrays;
+import java.util.List;
 import org.locationtech.jts.geom.Coordinate;
 import org.locationtech.jts.geom.GeometryFactory;
+import org.locationtech.jts.geom.LineString;
 import org.locationtech.jts.geom.Point;
 import org.locationtech.jts.geom.PrecisionModel;
 
@@ -33,5 +36,19 @@ public final class GeoPoints {
 
     public static GeoPointDto toDto(Point point) {
         return new GeoPointDto(point.getY(), point.getX());
+    }
+
+    /** Builds a route polyline from (lng, lat) pairs, e.g. straight from an OSRM GeoJSON response. */
+    public static LineString lineStringFromLngLatPairs(List<List<Double>> lngLatPairs) {
+        Coordinate[] coordinates = lngLatPairs.stream()
+                .map(pair -> new Coordinate(pair.get(0), pair.get(1)))
+                .toArray(Coordinate[]::new);
+        return FACTORY.createLineString(coordinates);
+    }
+
+    public static List<GeoPointDto> toDtoList(LineString lineString) {
+        return Arrays.stream(lineString.getCoordinates())
+                .map(c -> new GeoPointDto(c.y, c.x))
+                .toList();
     }
 }

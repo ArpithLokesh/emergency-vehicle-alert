@@ -1,5 +1,6 @@
 package com.evas.common;
 
+import com.evas.routing.RoutingException;
 import java.util.stream.Collectors;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
@@ -33,8 +34,18 @@ public class GlobalExceptionHandler {
     }
 
     @ExceptionHandler(DataIntegrityViolationException.class)
-    public ProblemDetail handleConflict(DataIntegrityViolationException ex) {
+    public ProblemDetail handleUniqueConstraint(DataIntegrityViolationException ex) {
         return ProblemDetail.forStatusAndDetail(
                 HttpStatus.CONFLICT, "A record with these unique fields already exists.");
+    }
+
+    @ExceptionHandler(ConflictException.class)
+    public ProblemDetail handleConflict(ConflictException ex) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.getMessage());
+    }
+
+    @ExceptionHandler(RoutingException.class)
+    public ProblemDetail handleRoutingFailure(RoutingException ex) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.BAD_GATEWAY, ex.getMessage());
     }
 }
