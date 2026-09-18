@@ -1,5 +1,6 @@
 package com.evas.trip;
 
+import com.evas.common.GeoPointDto;
 import jakarta.validation.Valid;
 import java.util.List;
 import java.util.UUID;
@@ -41,5 +42,15 @@ public class TripController {
     @PostMapping("/{id}/cancel")
     public TripResponse cancel(@PathVariable UUID id) {
         return TripResponse.from(tripService.cancel(id));
+    }
+
+    /**
+     * The vehicle's position feed. Returns a minimal receipt of the trip's
+     * own state (no device data) — see PositionUpdateResponse.
+     */
+    @PostMapping("/{id}/position")
+    public PositionUpdateResponse updatePosition(
+            @PathVariable UUID id, @Valid @RequestBody GeoPointDto position) {
+        return PositionUpdateResponse.from(tripService.updatePosition(id, position));
     }
 }

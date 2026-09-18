@@ -82,7 +82,10 @@ docs/
     LLD-data-model.md           — all MVP-0 entities (Vehicle, Lamppost, LamppostAlert, TrafficSignal) in one doc
   mvp-1/
     LLD-trip-and-routing.md     — Trip entity, TripService, RoutingService, CacheConfig
-  mvp-2/ (etc., created as each stage is designed)
+  mvp-2/
+    LLD-position-tracking.md    — position ingestion, arrival detection, stall watchdog
+  mvp-3/ (etc., created as each stage is designed)
+SIMULATOR-API-CONTRACT.md       — boundary contract for the external vehicle/device simulator
 FUTURE_UPGRADES.md              — backlog of deferred-but-planned ideas (project root)
 ```
 
@@ -95,8 +98,8 @@ explicitly rather than silently updating docs.
 
 - [x] **MVP-0 — Domain skeleton.** `Vehicle`, `Lamppost`, `TrafficSignal` as CRUD-able JPA entities. No trips, no routing. Demo: boot app, CRUD via REST/Postman, geometry columns round-trip correctly in Postgres.
 - [x] **MVP-1 — Trip creation + OSRM routing + caching.** Dispatcher creates a trip (vehicle + origin + destination); backend calls OSRM, stores route geometry. OSRM responses cached via Caffeine, keyed on (origin, destination) — no vehicle-profile dimension, that was speculative scope. Device-along-route spatial query deferred to MVP-3 (nothing consumes it until Alerting exists). Demo: route returned and visualizable — verified with real OSRM calls against real Bengaluru coordinates.
-- [ ] **MVP-2 — Simulated position feed + live ETA.** Starting a trip kicks off a background simulator advancing a virtual vehicle along the route every few seconds. ETA to each upstream device recomputes live. Demo: shrinking ETAs as the simulated vehicle approaches devices.
-- [ ] **MVP-3 — Alerting + signal preemption, with audit trail.** Crossing the (still-hardcoded) threshold triggers lamppost alert / signal force-green, observable via a per-device "pending instructions" endpoint + history of triggered alerts and forced/reverted signals. **Decide alert transport mechanism here.** First true end-to-end demo of the product concept.
+- [x] **MVP-2 — Position feed: tracking, arrival, stall detection.** An **external** simulator (separate project) POSTs vehicle positions to `POST /api/trips/{id}/position`; backend persists `last_known_position`, detects arrival (destination-proximity → `ARRIVED`, frees vehicle), and runs a stall watchdog (no position for ~45s → `STALE`, frees vehicle). Reactive backend, no in-process simulator. Live-ETA/device-proximity was moved *out* of here — it's alerting-internal (MVP-3), not a public endpoint. Demo: POST positions, watch `GET /api/trips/{id}` show the vehicle move and reach `ARRIVED`, or go `STALE` on silence. Verified end-to-end incl. a timed stall test.
+- [ ] **MVP-3 — Alerting + signal preemption, with audit trail.** Reacts **asynchronously** (post-commit `PositionUpdatedEvent`) to position updates; runs the device-proximity query *internally* (ST_DWithin around current position → ahead-only → along-route ETA, the design carried over from MVP-2 planning) and, on crossing the (hardcoded, pre-MVP-5) threshold, fires the two device command streams to RabbitMQ — signal force-green/revert (W7a) and lamppost broadcast (W7b) — with an audit trail. First true end-to-end demo of the product concept.
 - [ ] **MVP-4 — Auth & roles.** Login required; `DISPATCHER` vs `TRAFFIC_AUTHORITY_ADMIN`. Device-facing endpoints get separate device-credential auth (never reuse a user token for device commands).
 - [ ] **MVP-5 — Configurable policy.** Admin can view/edit alert threshold + preemption lead time per authority and per vehicle type, no redeploy needed. Alerting/Preemption engines read from policy store instead of constants.
 - [ ] **MVP-6 (stretch) — Hardening.** Safety-timeout reversion for stuck signals, graceful OSRM failure/retry handling, position-feed stall detection, Actuator health + correlation-ID logging, retention cleanup for raw position ticks.
@@ -126,7 +129,7 @@ across layered `controller/`/`service/`/`repository/` packages.
 
 ## Current status
 
-**MVP-0 and MVP-1 are complete.**
+**MVP-0, MVP-1, and MVP-2 are complete.**
 
 MVP-0: entities, repositories, and REST controllers for `Vehicle`,
 `Lamppost`, `TrafficSignal`, verified end-to-end with curl.
@@ -137,6 +140,15 @@ routing against real coordinates, one-active-trip-per-vehicle rejection
 (app + DB level), cancel flow (frees the vehicle), cache-hit timing
 (~15ms cached vs ~2s fresh), and OSRM-failure fail-fast behavior (502,
 nothing persisted). See `docs/mvp-1/` for the full design record.
+
+MVP-2: position ingestion (`POST /api/trips/{id}/position`), destination-
+proximity arrival, and a stall watchdog (`STALE` status), migration `V3`
+applied. `TrackingProperties` config; `@EnableScheduling` for the watchdog.
+Verified end-to-end: position updates move `last_known_position`, arrival
+frees the vehicle, terminal trips reject positions (409), and a timed test
+confirmed a silent feed → `STALE` at ~45s. Simulator is external (separate
+project); backend is reactive except the watchdog. See
+`docs/mvp-2/LLD-position-tracking.md`.
 
 Infra verified: Postgres+PostGIS (`evas-postgres`) and RabbitMQ
 (`evas-rabbitmq`) running in Docker.
@@ -150,5 +162,7 @@ the real endpoint. Re-runnable and idempotent (re-running skips existing
 `scripts/data/` since the public Overpass API proved occasionally
 slow/rate-limited.
 
-**Next**: MVP-2 — simulated position feed + live ETA-to-device
-recalculation.
+**Next**: MVP-3 — alerting + signal preemption. Reacts asynchronously to
+position updates (post-commit event), runs the device-proximity query
+internally, fires the two RabbitMQ device command streams (signal
+force-green/revert, lamppost broadcast) with an audit trail.

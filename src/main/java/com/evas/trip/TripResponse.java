@@ -13,6 +13,7 @@ public record TripResponse(
         GeoPointDto destination,
         List<GeoPointDto> routeGeometry,
         TripStatus status,
+        GeoPointDto lastKnownPosition,
         Instant createdAt,
         Instant completedAt
 ) {
@@ -24,6 +25,7 @@ public record TripResponse(
                 GeoPoints.toDto(trip.getDestination()),
                 GeoPoints.toDtoList(trip.getRouteGeometry()),
                 trip.getStatus(),
+                trip.getLastKnownPosition() != null ? GeoPoints.toDto(trip.getLastKnownPosition()) : null,
                 trip.getCreatedAt(),
                 trip.getCompletedAt());
     }

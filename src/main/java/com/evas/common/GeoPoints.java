@@ -51,4 +51,22 @@ public final class GeoPoints {
                 .map(c -> new GeoPointDto(c.y, c.x))
                 .toList();
     }
+
+    private static final double EARTH_RADIUS_METERS = 6_371_000.0;
+
+    /**
+     * Great-circle (Haversine) distance in metres between two WGS84 points.
+     * JTS's own {@code distance()} is planar (degrees), meaningless for
+     * real-world metres, so this is computed by hand. Accurate to well within
+     * the ~30 m arrival threshold at city scale.
+     */
+    public static double distanceMeters(Point a, Point b) {
+        double lat1 = Math.toRadians(a.getY());
+        double lat2 = Math.toRadians(b.getY());
+        double dLat = lat2 - lat1;
+        double dLng = Math.toRadians(b.getX() - a.getX());
+        double h = Math.sin(dLat / 2) * Math.sin(dLat / 2)
+                + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+        return 2 * EARTH_RADIUS_METERS * Math.asin(Math.min(1.0, Math.sqrt(h)));
+    }
 }

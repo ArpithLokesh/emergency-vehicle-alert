@@ -30,6 +30,7 @@ public class TripService {
     private final TripRepository tripRepository;
     private final VehicleRepository vehicleRepository;
     private final RoutingService routingService;
+    private final TrackingProperties trackingProperties;
 
     /**
      * @Transactional here matters: creating a trip touches two tables
@@ -72,6 +73,38 @@ public class TripService {
         return trip;
     }
 
+    /**
+     * Ingests one raw GPS position for an active trip and checks for arrival.
+     * Deliberately does no device/ETA work — that's alerting's concern
+     * (MVP-3), reacting asynchronously to position changes, not this
+     * request. Kept a plain point-to-point arrival check so the write path
+     * runs no spatial query.
+     */
+    @Transactional
+    public Trip updatePosition(UUID id, GeoPointDto positionDto) {
+        Trip trip = get(id);
+        if (trip.getStatus() != TripStatus.EN_ROUTE) {
+            throw new ConflictException(
+                    "Trip " + id + " is not EN_ROUTE (current status: " + trip.getStatus()
+                            + "), cannot accept position updates");
+        }
+
+        Point position = GeoPoints.fromDto(positionDto);
+        trip.setLastKnownPosition(position);
+        trip.setLastPositionAt(Instant.now());
+
+        if (GeoPoints.distanceMeters(position, trip.getDestination())
+                <= trackingProperties.arrivalThresholdMeters()) {
+            trip.setStatus(TripStatus.ARRIVED);
+            trip.setCompletedAt(Instant.now());
+            Vehicle vehicle = trip.getVehicle();
+            vehicle.setStatus(VehicleStatus.AVAILABLE);
+            vehicleRepository.save(vehicle);
+        }
+
+        return tripRepository.save(trip);
+    }
+
     public Trip get(UUID id) {
         return tripRepository.findById(id)
                 .orElseThrow(() -> new NotFoundException("Trip " + id + " not found"));
@@ -79,6 +112,28 @@ public class TripService {
 
     public List<Trip> list(TripStatus status) {
         return status != null ? tripRepository.findByStatus(status) : tripRepository.findAll();
+    }
+
+    /**
+     * Marks a stalled trip STALE and frees its vehicle. Called per-trip by
+     * the watchdog (a separate bean, so this @Transactional actually applies
+     * — a self-call would bypass the proxy). Re-checks EN_ROUTE inside the
+     * transaction: the trip may have ARRIVED or been CANCELLED between the
+     * watchdog's scan and this call, in which case we leave it alone.
+     */
+    @Transactional
+    public void markStale(UUID id) {
+        Trip trip = tripRepository.findById(id).orElse(null);
+        if (trip == null || trip.getStatus() != TripStatus.EN_ROUTE) {
+            return;
+        }
+        trip.setStatus(TripStatus.STALE);
+        trip.setCompletedAt(Instant.now());
+        tripRepository.save(trip);
+
+        Vehicle vehicle = trip.getVehicle();
+        vehicle.setStatus(VehicleStatus.AVAILABLE);
+        vehicleRepository.save(vehicle);
     }
 
     @Transactional

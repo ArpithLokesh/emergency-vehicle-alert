@@ -57,6 +57,14 @@ public class Trip {
     @Column(nullable = false, length = 16)
     private TripStatus status;
 
+    /** Latest raw GPS point reported by the vehicle; null until the first position update. */
+    @Column(name = "last_known_position", columnDefinition = "geometry(Point,4326)")
+    private Point lastKnownPosition;
+
+    /** When the last position update arrived; drives stall detection. Null until the first update. */
+    @Column(name = "last_position_at")
+    private Instant lastPositionAt;
+
     @Builder.Default
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt = Instant.now();

@@ -17,7 +17,7 @@ it — we meet in the middle), and one is **MVP-3 (future)**. Each is tagged.
                   │                 backend       │
    (route out) ◄──┼─────────────    (the "box")   │
    (ack out)   ◄──┼─────────────                  │
-   nearby ETAs ◄──┼─────────────                  │
+   (trip read) ◄──┼─────────────                  │
                   │                              │
    device alerts ◄┼───(RabbitMQ, MVP-3)──────────│
                  └──────────────────────────────┘
@@ -30,8 +30,9 @@ The simulator plays **two independent roles** that never talk to each other
 to the backend, never to one another:
 
 - **Vehicle-mover** — creates trips, streams positions, reads acks.
-- **Device-observer** — reads nearby-device ETAs (HTTP) and, in MVP-3,
-  receives device alerts (RabbitMQ).
+- **Device-observer** — receives device alerts over RabbitMQ (MVP-3 only).
+  It has nothing to do in MVP-2: there is no nearby-devices HTTP wire (that
+  logic is alerting-internal — see W4, removed).
 
 ---
 
@@ -54,7 +55,7 @@ to the backend, never to one another:
 | Geo point | `{"lat": <number -90..90>, "lng": <number -180..180>}` — plain lat/lng, **not** GeoJSON |
 | `VehicleType` | `AMBULANCE` \| `POLICE` \| `FIRE_ENGINE` |
 | `VehicleStatus` | `AVAILABLE` \| `ON_TRIP` \| `MAINTENANCE` \| `RETIRED` |
-| `TripStatus` | `EN_ROUTE` \| `ARRIVED` \| `CANCELLED` |
+| `TripStatus` | `EN_ROUTE` \| `ARRIVED` \| `CANCELLED` \| `STALE` (feed went silent — see C2/C3) |
 | Device `type` | `TRAFFIC_SIGNAL` \| `LAMPPOST` |
 | Error body | RFC 7807: `{"title","status","detail","instance"}` |
 
@@ -89,7 +90,7 @@ internal to the simulator and not specified here.
 ←  400  missing/invalid field, or lat/lng out of range
 ```
 
-### W3 — Send a position update · **MVP-2 (contract)** · `POST /api/trips/{id}/position`
+### W3 — Send a position update · **LIVE** · `POST /api/trips/{id}/position`
 The vehicle-mover's per-position call. The vehicle reports where it is and
 receives a **receipt of its own trip state only** — no device information
 flows back to the vehicle.
@@ -100,7 +101,7 @@ flows back to the vehicle.
          "lastKnownPosition":{"lat":12.9750,"lng":77.6100},
          "completedAt":null}                         // set when ARRIVED
 ←  404  unknown trip id
-←  409  trip not EN_ROUTE (already ARRIVED/CANCELLED) — stop sending for it
+←  409  trip not EN_ROUTE (already ARRIVED/CANCELLED/STALE) — stop sending for it
 ←  400  lat/lng out of range
 ```
 
@@ -115,25 +116,20 @@ For teardown / abandoning a run. Frees the vehicle back to `AVAILABLE`.
 
 ## Wires INTO the simulator (responses / feeds it reads)
 
-### W4 — Nearby-device ETAs · **MVP-2 (contract)** · `GET /api/trips/{id}/nearby-devices`
-The device-observer's read. Returns the devices the vehicle is *approaching*
-(ahead of it, within a radius the backend configures, ~2 km), soonest first.
-This is where "shrinking ETAs" is observed. Independent of W3 — reading it
-never moves the vehicle, and it is never returned to the vehicle.
-```
-←  200  [
-          {"deviceId":"<uuid>","type":"TRAFFIC_SIGNAL","code":"TS-OSM-26529522",
-           "location":{"lat":12.9746,"lng":77.6201},
-           "distanceMeters":840.5,"etaSeconds":72}
-        ]                                             // [] if no position yet, or nothing ahead in range
-←  404  unknown trip id
-```
-`etaSeconds` is an approximate estimate (constant-speed assumption) — it
-demonstrates the mechanism, not precise timing.
+### ~~W4 — Nearby-device ETAs~~ · **REMOVED — there is no such wire**
+Earlier drafts had a `GET /api/trips/{id}/nearby-devices` read for observing
+"shrinking ETAs." It was cut: "which devices is the vehicle approaching" is
+*internal* logic of the alerting engine (MVP-3), not a public endpoint —
+computed server-side to decide whom to alert, never exposed as a read and
+never returned to the vehicle. The simulator observes alerting **only** via
+the device alerts on RabbitMQ (W7, MVP-3). Do not build a nearby-devices
+poller. To watch position/lifecycle progress in MVP-2, use W6.
 
-### W6 — Plain trip read · **LIVE (core) / +position in MVP-2** · `GET /api/trips/{id}`
-Full trip incl. `routeGeometry`, `status`, and (from MVP-2)
-`lastKnownPosition`. `GET /api/trips?status=EN_ROUTE` lists active trips.
+### W6 — Plain trip read · **LIVE** · `GET /api/trips/{id}`
+Full trip incl. `routeGeometry`, `status`, and `lastKnownPosition`.
+`GET /api/trips?status=EN_ROUTE` lists active trips. This is how MVP-2
+progress is observed: POST positions (W3), watch `lastKnownPosition` move and
+`status` go `EN_ROUTE → ARRIVED` (or `→ STALE`).
 
 ### W7 — Device commands · **MVP-3 (future)** · RabbitMQ (AMQP), **not HTTP**
 When alerting exists, device commands are **published to RabbitMQ**, keyed
@@ -170,17 +166,19 @@ yet finalized and will be appended here when MVP-3 is designed.
   within ~30 m of destination). The simulator learns of it via `status:
   "ARRIVED"` in the W3 ack, and must then stop sending positions for that
   trip. The vehicle is auto-freed to `AVAILABLE` on arrival.
-- **C3 — terminal trips reject positions.** Once `ARRIVED` or `CANCELLED`,
-  W3 returns `409`. The mover should treat any `409`/`404` on W3 as
+- **C3 — terminal trips reject positions.** Once `ARRIVED`, `CANCELLED`, or
+  `STALE`, W3 returns `409`. The mover should treat any `409`/`404` on W3 as
   "stop tracking this trip."
-- **C4 — positions should trace the route.** Nothing rejects an off-route
-  position, but `nearby-devices` (W4) only returns devices *ahead along the
-  route within range*, so positions that wander off the returned
-  `routeGeometry` will show empty/erratic results.
+- **C4 — the stall watchdog.** If the backend receives no position for a
+  trip within its stale timeout (~45s, configurable), it marks the trip
+  `STALE` and frees the vehicle — so a dropped feed can't strand a
+  trip/vehicle. Keep sending on your chosen cadence (well under the timeout)
+  while a trip is live. A `STALE` trip is terminal (see C3); to resume after
+  a long gap, start a new trip. The generous timeout tolerates brief gaps.
 - **C5 — realistic test area.** The seeded real devices (405 traffic signals
   from OpenStreetMap) cover central Bengaluru, bounding box
-  `12.95,77.57 → 13.00,77.65`. Keep origins/destinations inside it so W4
-  returns real devices.
+  `12.95,77.57 → 13.00,77.65`. Keep origins/destinations inside it so that,
+  in MVP-3, the vehicle actually passes real devices to alert.
 
 ---
 
@@ -199,20 +197,22 @@ The simulator should branch on `status` (the HTTP code), and can surface
 
 ## End-to-end sequence (one trip)
 
+MVP-2 (device-observer idle until MVP-3's RabbitMQ alerts exist):
 ```
-vehicle-mover                         backend                  device-observer
-     │  W1 POST /api/vehicles ──────────►│                            │
-     │◄──────────── 201 {id: V} ─────────│                            │
-     │  W2 POST /api/trips (V, o, d) ────►│                            │
-     │◄─── 201 {id: T, routeGeometry} ───│                            │
-     │                                    │   W4 GET .../T/nearby-devices ►│
-     │  W3 POST .../T/position (p1) ─────►│◄──── 200 [ETAs...] ────────────│
-     │◄── 200 {status: EN_ROUTE} ────────│                            │
-     │  ... repeat W3 along the route ...  (observer polls W4 in parallel) │
-     │  W3 POST .../T/position (p_last) ─►│                            │
-     │◄── 200 {status: ARRIVED} ─────────│   (vehicle auto-freed)     │
-     │  stop.                              │                            │
+vehicle-mover                         backend
+     │  W1 POST /api/vehicles ──────────►│
+     │◄──────────── 201 {id: V} ─────────│
+     │  W2 POST /api/trips (V, o, d) ────►│
+     │◄─── 201 {id: T, routeGeometry} ───│
+     │  W3 POST .../T/position (p1) ─────►│
+     │◄── 200 {status: EN_ROUTE} ────────│   (keep sending under the stall timeout)
+     │  ... repeat W3 along the route ...  │
+     │  W3 POST .../T/position (p_last) ─►│
+     │◄── 200 {status: ARRIVED} ─────────│   (vehicle auto-freed)
+     │  stop.                              │
 ```
+If the mover stops before arriving, the backend's stall watchdog flips the
+trip to `STALE` and frees the vehicle after the timeout (C4).
 
 ---
 
@@ -220,9 +220,9 @@ vehicle-mover                         backend                  device-observer
 
 | Tag | Meaning |
 |---|---|
-| **LIVE** | Works against the running backend today (MVP-0 / MVP-1). |
-| **MVP-2 (contract)** | Not built yet; this doc is the agreed shape. Backend and simulator build to it in parallel. |
+| **LIVE** | Works against the running backend today (MVP-0 / MVP-1 / MVP-2). |
 | **MVP-3 (future)** | Design not finalized; placeholder so the simulator can plan its device-observer role. |
 
-*Last updated: 2026-09-18. Owns the boundary only; backend-internal design
-lives in `docs/HLD.md` and `docs/mvp-*/LLD-*.md`.*
+*Last updated: 2026-09-19 (MVP-2 shipped: W3 live, W4 removed). Owns the
+boundary only; backend-internal design lives in `docs/HLD.md` and
+`docs/mvp-*/LLD-*.md`.*

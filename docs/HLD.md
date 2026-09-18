@@ -1,7 +1,7 @@
 # High-Level Design
 
-**Version:** 1.2.0
-**Status:** MVP-0 and MVP-1 implemented and verified end-to-end. MVP-2 next.
+**Version:** 1.3.0
+**Status:** MVP-0, MVP-1, MVP-2 implemented and verified end-to-end. MVP-3 (alerting/preemption) next.
 
 This is the single, living end-to-end HLD for the Emergency Vehicle Alert
 System backend — the whole-system architecture, updated in place as design
@@ -27,10 +27,12 @@ Who/what talks to this backend:
 - **OSRM** (external HTTP service) → the backend calls it for road-snapped
   routes.
 - **Postgres/PostGIS** → the backend's own datastore.
-- **Position simulator** → runs *inside* the backend process for now (not
-  yet built — MVP-2), behind an ingestion interface designed so a real GPS
-  feed can implement the same interface later without touching downstream
-  logic.
+- **External vehicle simulator** → a *separate* application (not part of
+  this backend) that POSTs vehicle positions to the ingestion endpoint,
+  exactly as a real GPS/AVL unit would. The backend is purely reactive to
+  this feed — it runs no in-process simulator and no position scheduler.
+  (Boundary contract: `docs/SIMULATOR-API-CONTRACT.md`.) The one scheduled
+  job the backend does run is the stall watchdog — see below.
 - **RabbitMQ** → the backend publishes lamppost alert instructions here;
   a real lamppost device (out of scope) would consume from its bound queue.
   No real device exists in this project — the API/messaging surface is
@@ -47,18 +49,22 @@ what's actually built vs. still design-only.
 - **Device** — Lamppost + TrafficSignal registries (CRUD, active/inactive).
   ✅ Built, MVP-0. Spatial "devices along a route" query not yet built —
   see the happy-path correction below.
-- **Trip** — owns trip lifecycle (`EN_ROUTE`/`ARRIVED`/`CANCELLED`), the
-  entry point dispatcher calls hit. ✅ Built, MVP-1 (creation + cancel;
-  `ARRIVED` is unreachable until Position exists).
+- **Trip** — owns trip lifecycle (`EN_ROUTE`/`ARRIVED`/`CANCELLED`/`STALE`),
+  the entry point dispatcher calls hit. ✅ Built, MVP-1 (creation + cancel);
+  MVP-2 added position ingestion, arrival detection (`→ ARRIVED`), and the
+  stall watchdog (`→ STALE`).
 - **Routing** — talks to OSRM, stores route geometry, owns the Caffeine
-  route-response cache. ✅ Built, MVP-1. The "devices along this route"
-  spatial query is **not** part of this component's current scope — see
+  route-response cache. ✅ Built, MVP-1. The "devices near the vehicle"
+  proximity query is **not** here — it's alerting-internal (MVP-3), see
   correction below.
-- **Position** — the ingestion interface + the in-process simulator
-  implementation; advances a trip's position on a timer and recomputes
-  ETA-to-each-watched-device. ❌ Not built — MVP-2.
-- **Alerting** — watches ETA-to-lamppost, fires/records alert instructions
-  once threshold is crossed (idempotent per trip+device), publishes to
+- **Position** — position ingestion (`POST /api/trips/{id}/position`),
+  arrival detection, and the stall watchdog. ✅ Built, MVP-2. Reactive
+  only: the vehicle feed is external (see System Context); the watchdog is
+  the sole scheduled job, present precisely to detect *absence* of the feed.
+  No ETA computation here — that's alerting's.
+- **Alerting** — reacts to position updates (asynchronously, see wiring
+  decision), runs the device-proximity query internally, computes ETA,
+  fires/records lamppost alerts (idempotent per trip+device), publishes to
   RabbitMQ. ❌ Not built — MVP-3.
 - **Preemption** — watches ETA-to-signal, fires force-green / reverts,
   records override events. ❌ Not built — MVP-3.
@@ -72,8 +78,8 @@ what's actually built vs. still design-only.
 
 ## Core "Happy Path" Data Flow
 
-Steps 1–3 are built and verified (MVP-1). Steps 4 onward are the designed
-target for MVP-2/MVP-3, not yet implemented.
+Steps 1–4 and 8 are built and verified (MVP-1 + MVP-2). Steps 5–7 (alerting/
+preemption) are the designed target for MVP-3, not yet implemented.
 
 1. Dispatcher calls **Trip** to create a trip (vehicle + origin +
    destination). ✅
@@ -83,48 +89,50 @@ target for MVP-2/MVP-3, not yet implemented.
    caches the response. Fail-fast: any OSRM failure aborts the whole
    request, nothing is persisted. ✅
 3. Trip status is `EN_ROUTE`; the vehicle flips to `ON_TRIP`. ✅
-4. *(MVP-2, not built)* **Position** starts advancing a virtual vehicle
-   along the stored route geometry on a timer (every 1–5s), recomputing
-   ETA to each upstream device.
-5. *(MVP-3, not built)* **Routing** runs the device-along-route spatial
-   query against **Device** at this point — **not** at trip-creation time
-   as originally designed. Corrected during MVP-1: nothing consumes that
-   "devices to watch" list until Alerting exists, so building it earlier
-   would be dead code sitting unused for two stages.
+4. The **external simulator** POSTs the vehicle's live positions to
+   `POST /api/trips/{id}/position`. **Position** persists each as
+   `last_known_position` (+ `last_position_at`) and returns a minimal
+   receipt — no device data (the vehicle is a dumb emitter). ✅
+5. *(MVP-3, not built)* A position update publishes a `PositionUpdatedEvent`;
+   **Alerting** reacts **asynchronously** (see wiring decision), running the
+   device-proximity query internally: `ST_DWithin` around the current
+   position (GIST-indexed) → ahead-only filter via `ST_LineLocatePoint` →
+   along-route ETA. This proximity query is alerting-internal; it is *not* a
+   public endpoint and *not* run on the position write path.
 6. *(MVP-3, not built)* **Alerting** checks ETA-to-lamppost against the
-   (hardcoded, pre-MVP-5) threshold; once crossed, fires an alert
-   instruction (published to RabbitMQ) + records it, won't re-fire for
-   that trip+lamppost pair.
+   (hardcoded, pre-MVP-5) threshold; once crossed, publishes a broadcast
+   instruction to RabbitMQ + records it, won't re-fire for that
+   trip+lamppost pair.
 7. *(MVP-3, not built)* **Preemption** does the equivalent for signals:
-   force-green once within lead time, revert once the vehicle's position
-   passes the signal's point on the route (or a safety timeout fires).
-8. *(MVP-2, not built)* **Trip** flips to `ARRIVED` when the vehicle's
-   *current position* comes within a threshold distance (e.g. ~20–50m, TBD
-   when built) of the trip's `destination` point — **not** via a
-   traveled-distance-along-planned-route check, which silently breaks the
-   moment a real vehicle takes a detour (obstruction, driver choice,
-   traffic), since it assumes the vehicle stays exactly on the
-   OSRM-planned polyline. A destination-proximity check (simple
-   point-to-point distance, independent of the route geometry) is
-   deviation-tolerant and doesn't require full mid-trip re-routing support
-   (still a stretch goal) to be correct. This means `Trip` will need a
-   `last_known_position` field when MVP-2's LLD is designed — deliberately
-   trimmed from the MVP-1 schema since nothing read it yet (see decisions
-   below), but it comes back here.
+   force-green once within lead time, revert once the vehicle passes (or a
+   safety timeout fires).
+8. **Trip** flips to `ARRIVED` when the vehicle's *current position* comes
+   within `arrivalThresholdMeters` (~30m, configurable) of `destination` —
+   a destination-proximity check (Java Haversine, point-to-point), **not** a
+   traveled-distance-along-route check, which would silently break on any
+   real-world detour. Frees the vehicle to `AVAILABLE`. ✅
+9. **Stall watchdog**: if no position arrives for `staleTimeout` (~45s,
+   configurable), the trip flips to `STALE` and the vehicle is freed — so a
+   dropped feed can't strand a trip/vehicle forever. The one scheduled job
+   in an otherwise-reactive backend, present precisely to detect the
+   *absence* of the feed. ✅
 
 Dispatcher can also cancel a trip (`EN_ROUTE → CANCELLED`) at any point —
 built, MVP-1.
 
 ## Key Architectural Decisions
 
-- **Component wiring**: Position's tick handler will call **directly**
-  into `AlertingService.evaluate(trip)` and `PreemptionService.evaluate(trip)`
-  after updating ETA — no internal event bus. Chosen over Spring
-  application events because a direct call chain is easier to trace/debug
-  with breakpoints while still learning how the pieces connect; the
-  coupling cost is small at this scale. Revisit if a third reactor needs
-  to hook into position updates and the direct-call list gets unwieldy.
-  *(Designed, not yet exercised — MVP-2/3.)*
+- **Component wiring — async, not direct** (reversed from an earlier draft):
+  when Alerting/Preemption arrive (MVP-3), a position update will publish a
+  `PositionUpdatedEvent` after commit, and they react via
+  `@Async @TransactionalEventListener(AFTER_COMMIT)` — decoupled and on a
+  separate thread. A prior draft of this HLD called for Position to invoke
+  `AlertingService.evaluate()` *directly* (chosen then for breakpoint-level
+  traceability). That's reversed: position ingestion must get a fast ack and
+  must never fail or roll back because a downstream alert publish was slow or
+  errored — losing GPS data over an alerting hiccup is backwards. Alerting
+  only ever sees committed positions. *(Principle locked; event + listeners
+  built in MVP-3 — no event is published in MVP-2 since nothing listens.)*
 - **Trip creation is fail-fast**: OSRM is called synchronously inside
   `POST /api/trips`. On failure, nothing is persisted — no `Trip` row, no
   vehicle status change — dispatcher just retries. No `ROUTING_FAILED`
@@ -140,11 +148,20 @@ built, MVP-1.
   `CANCELLED`) even though `ARRIVED` is unreachable until MVP-2 — avoids a
   second migration touching the same CHECK constraint later. The one place
   this design deliberately did *not* trim to only what's immediately used.
-- **Trip fields were deliberately trimmed**: `route_distance_meters`,
-  `route_duration_seconds`, `traveled_meters`, `simulated_speed_mps` were
-  cut from the original draft (none had a consumer). `last_known_position`
-  was also cut but is now known to be needed back for MVP-2 (see happy-path
-  step 8) — add it then, not speculatively now.
+- **Trip fields were deliberately trimmed** in MVP-1: `route_distance_meters`,
+  `route_duration_seconds`, `traveled_meters`, `simulated_speed_mps` cut
+  (none had a consumer). `last_known_position` was also cut then and **added
+  back in MVP-2** (+ `last_position_at`) once position ingestion and stall
+  detection actually needed them — the trim-until-needed discipline working
+  as intended.
+- **Stall detection** (MVP-2): a `@Scheduled` watchdog marks `EN_ROUTE`
+  trips `STALE` (and frees the vehicle) after `staleTimeout` of silence,
+  using `COALESCE(last_position_at, created_at)` so it catches both a feed
+  that died mid-trip and one that never started. This is the *only*
+  scheduled job in the backend — justified because detecting the *absence*
+  of input is the one thing a purely reactive design cannot do on its own.
+  `STALE` is a distinct terminal status from `CANCELLED` (system-detected
+  loss vs. operator action — matters for audit). ✅
 - **Caching**: Spring's cache abstraction (`@Cacheable`) backed by
   Caffeine (in-memory), fitting the single-instance/no-HA deployment
   model. Swappable to Redis later by changing only the `CacheManager`
@@ -185,3 +202,4 @@ built, MVP-1.
 | 1.0.0 | 2026-09-14 | Initial HLD: system context, components, happy-path data flow, wiring/caching/messaging/schema decisions. |
 | 1.1.0 | 2026-09-14 | MVP-1 implemented: Trip + Routing + Caching. Corrected happy-path step 3 (device-along-route query deferred to MVP-3). Written as a separate delta file at the time (`docs/mvp-1/HLD.md`). |
 | 1.2.0 | 2026-09-17 | **Consolidated back into a single document.** The mvp-0/mvp-1 HLD-delta-file split made the current end-to-end design hard to see without reading and merging multiple files — reverted. `docs/mvp-0/HLD.md` and `docs/mvp-1/HLD.md` are retired; this file is the sole HLD going forward. Also folded in the config-externalization decision (`RoutingProperties`/`OsrmCacheProperties`) that had been implemented after `docs/mvp-1/HLD.md` was last written and had no HLD home. LLDs remain per-MVP-stage (`docs/mvp-N/LLD-*.md`) — unaffected by this change. |
+| 1.3.0 | 2026-09-19 | MVP-2 implemented + several decisions reshaped. Vehicle simulator is **external** (backend reactive, no in-process sim). Position component built: ingestion endpoint, destination-proximity arrival, and a stall watchdog (`STALE` status). Component wiring **reversed** to async post-commit events (from the earlier direct-call plan). Device-proximity/ETA is **alerting-internal (MVP-3)**, not a public endpoint — no `nearby-devices` API. Trip regained `last_known_position` + `last_position_at`. |
