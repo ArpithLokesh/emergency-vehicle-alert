@@ -1,6 +1,6 @@
 # LLD: Trip + Routing (MVP-1)
 
-**HLD version this was written against:** 1.1.0 (`docs/mvp-1/HLD.md`)
+**HLD version this was written against:** 1.2.0 (`docs/HLD.md` — consolidated; originally written against the now-retired `docs/mvp-1/HLD.md` v1.1.0)
 **Status:** Implemented and verified end-to-end (curl, real OSRM calls,
 cache-hit timing, failure-path testing). See ROADMAP.md for the full
 verification log.
@@ -18,7 +18,7 @@ verification log.
 | `completed_at` | Instant, nullable | set on `ARRIVED` or `CANCELLED` |
 
 Deliberately **not** included (trimmed from an earlier draft — see
-`docs/mvp-1/HLD.md`): `route_distance_meters`, `route_duration_seconds`,
+`docs/HLD.md`): `route_distance_meters`, `route_duration_seconds`,
 `traveled_meters`, `simulated_speed_mps`, `last_known_position`. None have
 a consumer yet; add back when the MVP-2 simulator actually needs them.
 
@@ -70,7 +70,7 @@ via Spring's `RestClient`. Parses the GeoJSON coordinate array into a JTS
   from `OsrmCacheProperties` (`caching.osrm-routes.*` — `maximum-size`,
   `expire-after-write`, defaults `500`/`24h`) rather than hardcoded
   literals, and rather than relying on Spring Boot's cache
-  autoconfiguration — see `docs/mvp-1/HLD.md` for why the latter.
+  autoconfiguration — see `docs/HLD.md` for why the latter.
 
 ## New exception types (`com.evas.common`)
 

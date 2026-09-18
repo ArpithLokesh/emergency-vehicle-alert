@@ -47,7 +47,7 @@ backend service only.
 - **Lamppost** and **TrafficSignal** are separate entities, not a unified "roadside unit" type.
 - All geodata: PostGIS geometry columns, SRID 4326 (WGS84). Note: JTS/PostGIS coordinate order is `(lng, lat)`. Geometry over REST is plain `{lat, lng}`, not GeoJSON.
 - **Routing/ETA**: delegated to OSRM over HTTP. No in-house routing algorithm.
-- **Trip arrival detection**: destination-proximity check (current position within a threshold of the trip's destination point), **not** traveled-distance-along-planned-route — the latter breaks on any real-world detour. See `docs/mvp-0/HLD.md` happy-path step 8.
+- **Trip arrival detection**: destination-proximity check (current position within a threshold of the trip's destination point), **not** traveled-distance-along-planned-route — the latter breaks on any real-world detour. See `docs/HLD.md` happy-path step 8.
 - **Vehicle position source**: simulator for now, behind an ingestion interface so real GPS can swap in later without touching downstream logic.
 - **Alert/command delivery transport**: **RabbitMQ**, locked in — a topic exchange with each Lamppost binding its own queue via a `routingKey` field. Full topology detail deferred to MVP-3. See `docs/mvp-0/LLD-data-model.md`.
 - **Caching**: Spring's cache abstraction (`@Cacheable`/`@CacheEvict`) backed by **Caffeine** (in-memory) now — fits the single-instance/no-HA deployment model. Swappable to Redis later by changing only the `CacheManager` bean; business code using `@Cacheable` doesn't change.
@@ -65,25 +65,31 @@ backend service only.
 
 ## Documentation
 
-Design docs live in `docs/<mvp-stage>/`, organized by MVP stage/functionality
-rather than split into separate hld/ vs lld/ folders:
+**HLD is a single, running document** (`docs/HLD.md`) — the current
+end-to-end architecture, versioned, updated in place with a changelog
+tracking what changed and why. Not split per MVP stage: an earlier attempt
+to fragment it into `docs/mvp-N/HLD.md` delta files made the current
+design hard to see without reading and merging several files, and was
+reverted.
+
+**LLDs stay organized per MVP stage** (`docs/mvp-N/LLD-*.md`) — that split
+works fine, since each LLD is genuinely scoped to what that stage builds:
 
 ```
 docs/
+  HLD.md                        — single end-to-end HLD, versioned, changelog
   mvp-0/
-    HLD.md              — versioned (starts 1.0.0), whole-system design + changelog
-    LLD-data-model.md   — all MVP-0 entities (Vehicle, Lamppost, LamppostAlert, TrafficSignal) in one doc
+    LLD-data-model.md           — all MVP-0 entities (Vehicle, Lamppost, LamppostAlert, TrafficSignal) in one doc
   mvp-1/
-    HLD.md                    — delta from mvp-0 (v1.1.0): Trip + Routing + Caching, corrects mvp-0's device-along-route timing
-    LLD-trip-and-routing.md   — Trip entity, TripService, RoutingService, CacheConfig
+    LLD-trip-and-routing.md     — Trip entity, TripService, RoutingService, CacheConfig
   mvp-2/ (etc., created as each stage is designed)
-FUTURE_UPGRADES.md       — backlog of deferred-but-planned ideas (project root)
+FUTURE_UPGRADES.md              — backlog of deferred-but-planned ideas (project root)
 ```
 
-Each `HLD.md` carries a version number and changelog; each `LLD-*.md` has its
-own changelog table. When a code change has a downstream implication on a
-design doc that might not be obvious, Claude flags it explicitly rather than
-silently updating docs.
+Each `LLD-*.md` has its own changelog table and states which `HLD.md`
+version it was written against. When a code change has a downstream
+implication on a design doc that might not be obvious, Claude flags it
+explicitly rather than silently updating docs.
 
 ## MVP Roadmap
 
@@ -134,6 +140,15 @@ nothing persisted). See `docs/mvp-1/` for the full design record.
 
 Infra verified: Postgres+PostGIS (`evas-postgres`) and RabbitMQ
 (`evas-rabbitmq`) running in Docker.
+
+**Real test data**: 405 real traffic signals from OpenStreetMap (central
+Bengaluru, MG Road/Indiranagar corridor) loaded via
+`scripts/import-osm-traffic-signals.py`, which replays an Overpass export
+through `POST /api/traffic-signals` — no new application code, exercises
+the real endpoint. Re-runnable and idempotent (re-running skips existing
+`TS-OSM-<id>` codes rather than duplicating). Cached fetch in
+`scripts/data/` since the public Overpass API proved occasionally
+slow/rate-limited.
 
 **Next**: MVP-2 — simulated position feed + live ETA-to-device
 recalculation.

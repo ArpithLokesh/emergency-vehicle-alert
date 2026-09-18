@@ -1,6 +1,6 @@
 # LLD: MVP-0 Data Model
 
-**HLD version this was written against:** 1.0.0 (`docs/mvp-0/HLD.md`)
+**HLD version this was written against:** 1.2.0 (`docs/HLD.md` — consolidated; originally written against the now-retired `docs/mvp-0/HLD.md` v1.0.0)
 **Status:** MVP-0 fully implemented — entities, repositories, and REST
 controllers for `Vehicle`, `Lamppost`, `TrafficSignal`, migration `V1`
 applied and validated (Hibernate `ddl-auto=validate` passes clean). All

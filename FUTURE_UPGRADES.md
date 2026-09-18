@@ -24,9 +24,18 @@ permanently excluded from this project's vision. Add to this whenever a
   traffic authority per instance for now; the policy/config model (MVP-5)
   should be designed so a future authority-scoping concept could be added
   without a full rewrite, even though it's not built now.
+- **A real device-import service.** Real traffic signal data is currently
+  loaded via `scripts/import-osm-traffic-signals.py`, a one-off script that
+  replays an Overpass/OSM export through `POST /api/traffic-signals` — no
+  new application code, but also not reusable as a product feature. If
+  bulk device import ever becomes an actual Admin-facing capability (e.g.
+  "upload a GIS export"), build a proper importer: a parser + idempotent
+  upsert, not a script. Chose the script now because the need was
+  speculative; revisit if it stops being speculative.
 
 ## Changelog
 
 | Date | Change |
 |---|---|
 | 2026-09-14 | Initial backlog seeded from MVP-0 design session. |
+| 2026-09-17 | Added: a real device-import service, deferred in favor of a one-off script (see `scripts/import-osm-traffic-signals.py`). |
