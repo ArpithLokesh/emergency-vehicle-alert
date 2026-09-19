@@ -98,7 +98,7 @@ explicitly rather than silently updating docs.
 
 - [x] **MVP-0 — Domain skeleton.** `Vehicle`, `Lamppost`, `TrafficSignal` as CRUD-able JPA entities. No trips, no routing. Demo: boot app, CRUD via REST/Postman, geometry columns round-trip correctly in Postgres.
 - [x] **MVP-1 — Trip creation + OSRM routing + caching.** Dispatcher creates a trip (vehicle + origin + destination); backend calls OSRM, stores route geometry. OSRM responses cached via Caffeine, keyed on (origin, destination) — no vehicle-profile dimension, that was speculative scope. Device-along-route spatial query deferred to MVP-3 (nothing consumes it until Alerting exists). Demo: route returned and visualizable — verified with real OSRM calls against real Bengaluru coordinates.
-- [x] **MVP-2 — Position feed: tracking, arrival, stall detection.** An **external** simulator (separate project) POSTs vehicle positions to `POST /api/trips/{id}/position`; backend persists `last_known_position`, detects arrival (destination-proximity → `ARRIVED`, frees vehicle), and runs a stall watchdog (no position for ~45s → `STALE`, frees vehicle). Reactive backend, no in-process simulator. Live-ETA/device-proximity was moved *out* of here — it's alerting-internal (MVP-3), not a public endpoint. Demo: POST positions, watch `GET /api/trips/{id}` show the vehicle move and reach `ARRIVED`, or go `STALE` on silence. Verified end-to-end incl. a timed stall test.
+- [x] **MVP-2 — Position feed: tracking, arrival, stall detection.** An **external** simulator (separate project) POSTs vehicle positions to `POST /api/trips/{id}/position`; backend persists `last_known_position`, detects arrival (destination-proximity → `ARRIVED`, frees vehicle), and runs a two-tier stall watchdog (no position for ~120s → `STALE`, paused/recoverable, vehicle stays `ON_TRIP`; still silent past ~300s → `EXPIRED`, terminal, frees vehicle). A position update to a `STALE` trip resumes it transparently back to `EN_ROUTE`. Reactive backend, no in-process simulator. Live-ETA/device-proximity was moved *out* of here — it's alerting-internal (MVP-3), not a public endpoint. Demo: POST positions, watch `GET /api/trips/{id}` show the vehicle move and reach `ARRIVED`, or pause to `STALE` and either resume or `EXPIRE` on continued silence. Verified end-to-end incl. timed stall/resume/expiry tests.
 - [ ] **MVP-3 — Alerting + signal preemption, with audit trail.** Reacts **asynchronously** (post-commit `PositionUpdatedEvent`) to position updates; runs the device-proximity query *internally* (ST_DWithin around current position → ahead-only → along-route ETA, the design carried over from MVP-2 planning) and, on crossing the (hardcoded, pre-MVP-5) threshold, fires the two device command streams to RabbitMQ — signal force-green/revert (W7a) and lamppost broadcast (W7b) — with an audit trail. First true end-to-end demo of the product concept.
 - [ ] **MVP-4 — Auth & roles.** Login required; `DISPATCHER` vs `TRAFFIC_AUTHORITY_ADMIN`. Device-facing endpoints get separate device-credential auth (never reuse a user token for device commands).
 - [ ] **MVP-5 — Configurable policy.** Admin can view/edit alert threshold + preemption lead time per authority and per vehicle type, no redeploy needed. Alerting/Preemption engines read from policy store instead of constants.
@@ -142,13 +142,15 @@ routing against real coordinates, one-active-trip-per-vehicle rejection
 nothing persisted). See `docs/mvp-1/` for the full design record.
 
 MVP-2: position ingestion (`POST /api/trips/{id}/position`), destination-
-proximity arrival, and a stall watchdog (`STALE` status), migration `V3`
-applied. `TrackingProperties` config; `@EnableScheduling` for the watchdog.
+proximity arrival, and a two-tier stall watchdog (`STALE` paused/
+recoverable, `EXPIRED` terminal), migrations `V3`+`V4` applied.
+`TrackingProperties` config; `@EnableScheduling` for the watchdog.
 Verified end-to-end: position updates move `last_known_position`, arrival
-frees the vehicle, terminal trips reject positions (409), and a timed test
-confirmed a silent feed → `STALE` at ~45s. Simulator is external (separate
-project); backend is reactive except the watchdog. See
-`docs/mvp-2/LLD-position-tracking.md`.
+frees the vehicle, terminal trips reject positions (409), a `STALE` trip
+resumes transparently on the next position, and timed tests confirmed
+`STALE` at ~120s and `EXPIRED` at ~300s of continued silence. Simulator
+is external (separate project); backend is reactive except the watchdog.
+See `docs/mvp-2/LLD-position-tracking.md`.
 
 Infra verified: Postgres+PostGIS (`evas-postgres`) and RabbitMQ
 (`evas-rabbitmq`) running in Docker.
