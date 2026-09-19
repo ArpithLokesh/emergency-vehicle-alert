@@ -1,5 +1,6 @@
 package com.evas.vehicle;
 
+import com.evas.common.ConflictException;
 import com.evas.common.NotFoundException;
 import jakarta.validation.Valid;
 import java.util.List;
@@ -69,7 +70,8 @@ public class VehicleController {
         if (request.callSign() != null) {
             vehicle.setCallSign(request.callSign());
         }
-        if (request.status() != null) {
+        if (request.status() != null && request.status() != vehicle.getStatus()) {
+            validateStatusTransition(vehicle.getStatus(), request.status());
             vehicle.setStatus(request.status());
         }
         return VehicleResponse.from(vehicleRepository.save(vehicle));
@@ -78,5 +80,25 @@ public class VehicleController {
     private Vehicle findOrThrow(UUID id) {
         return vehicleRepository.findById(id)
                 .orElseThrow(() -> new NotFoundException("Vehicle " + id + " not found"));
+    }
+
+    /**
+     * PATCH is an admin action on the registry, not the trip lifecycle —
+     * ON_TRIP is exclusively TripService's to set (trip creation) and clear
+     * (trip termination); letting PATCH touch it would let an admin desync
+     * the vehicle from what TripService believes is true (an active or
+     * absent trip). Cancel the trip instead of PATCHing around it.
+     * RETIRED is terminal: retiring a vehicle is a one-way decision, not a
+     * status to recover from via this endpoint.
+     */
+    private void validateStatusTransition(VehicleStatus from, VehicleStatus to) {
+        if (from == VehicleStatus.ON_TRIP || to == VehicleStatus.ON_TRIP) {
+            throw new ConflictException(
+                    "Cannot change vehicle status to/from ON_TRIP directly; "
+                            + "that transition belongs to trip creation/cancellation");
+        }
+        if (from == VehicleStatus.RETIRED) {
+            throw new ConflictException("Vehicle is RETIRED, a terminal status");
+        }
     }
 }
