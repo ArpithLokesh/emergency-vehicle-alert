@@ -19,6 +19,9 @@ public interface SignalPreemptionRepository extends JpaRepository<SignalPreempti
     /** ACTIVE preemptions stuck past the safety-timeout cutoff — used by the sweep. */
     List<SignalPreemption> findByStateAndForceGreenAtBefore(SignalPreemptionState state, Instant cutoff);
 
+    /** Used only for the startup log — how many preemptions are ACTIVE right now (i.e. survived from before a restart). */
+    long countByState(SignalPreemptionState state);
+
     /**
      * Atomic conditional revert: flips ACTIVE -> REVERTED only if it's still
      * ACTIVE, returning the number of rows changed (0 or 1). Needed because

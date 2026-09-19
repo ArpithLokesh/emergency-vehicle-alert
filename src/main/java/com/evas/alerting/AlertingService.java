@@ -140,6 +140,25 @@ public class AlertingService {
         // against the same tracked devices once positions resume.
     }
 
+    /**
+     * Reverts one preemption regardless of what triggered it — the safety
+     * net for anything {@link #evaluate}'s own pass-detection or
+     * {@link #handleTripReset} missed (a crashed listener, a bug, a vehicle
+     * that stops transmitting without ever going through the STALE/EXPIRED
+     * lifecycle for some reason). Called per-row by
+     * {@code SignalPreemptionSafetyWatchdog} (a separate bean, so this
+     * {@code @Transactional} actually applies — a self-call would bypass
+     * the proxy, same reason {@code TripService.markStale} is called from a
+     * separate watchdog bean). {@link SignalPreemptionRepository#revertIfActive}
+     * being an atomic conditional update means this is safe even if the
+     * signal was already reverted by another path moments earlier.
+     */
+    @Transactional
+    public void revertStuckPreemption(UUID preemptionId) {
+        signalPreemptionRepository.findById(preemptionId).ifPresent(preemption ->
+                revertSignalIfActive(preemption.getTrip().getId(), preemption.getSignal().getId(), RevertReason.TIMEOUT));
+    }
+
     private RevertReason mapReason(TripTerminationReason reason) {
         return switch (reason) {
             case PAUSED -> RevertReason.TRIP_PAUSED;
