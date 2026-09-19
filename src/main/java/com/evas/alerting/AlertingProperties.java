@@ -17,6 +17,7 @@ public record AlertingProperties(
         double signalTriggerDistanceMeters,
         double revertMarginMeters,
         double deviationThresholdMeters,
+        double routeCorridorMeters,
         Duration safetyTimeout,
         Duration sweepInterval,
         Executor executor
@@ -36,6 +37,13 @@ public record AlertingProperties(
         }
         if (deviationThresholdMeters <= 0) {
             deviationThresholdMeters = 100;
+        }
+        if (routeCorridorMeters <= 0) {
+            // How far off the route's centerline a device can be and still
+            // count as "on this route" for window population — distinct
+            // from deviationThresholdMeters (which is about the *vehicle*
+            // straying from its route, not a *device*'s distance from it).
+            routeCorridorMeters = 50;
         }
         if (safetyTimeout == null) {
             safetyTimeout = Duration.ofSeconds(120);

@@ -63,6 +63,7 @@ alerting:
   signal-trigger-distance-meters: 400  # along-route distance to force-green a signal
   revert-margin-meters: 30          # along-route distance past a device to consider it "passed"
   deviation-threshold-meters: 100   # straight-line distance from route to trigger a re-route
+  route-corridor-meters: 50         # how far off the route a device can be and still count as "on it"
   safety-timeout: 120s              # revert a stuck ACTIVE preemption after this regardless
   sweep-interval: 30s               # how often the safety-timeout sweep scans
   executor:
