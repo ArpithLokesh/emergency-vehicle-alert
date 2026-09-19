@@ -9,9 +9,13 @@ import com.evas.vehicle.Vehicle;
 import com.evas.vehicle.VehicleRepository;
 import com.evas.vehicle.VehicleStatus;
 import java.time.Instant;
+import java.util.EnumSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import lombok.RequiredArgsConstructor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.locationtech.jts.geom.LineString;
 import org.locationtech.jts.geom.Point;
 import org.springframework.stereotype.Service;
@@ -26,6 +30,11 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 @RequiredArgsConstructor
 public class TripService {
+
+    private static final Logger log = LoggerFactory.getLogger(TripService.class);
+
+    /** Statuses under which a vehicle is considered actively assigned to a trip. */
+    private static final Set<TripStatus> ACTIVE_STATUSES = EnumSet.of(TripStatus.EN_ROUTE, TripStatus.STALE);
 
     private final TripRepository tripRepository;
     private final VehicleRepository vehicleRepository;
@@ -48,7 +57,7 @@ public class TripService {
             throw new ConflictException(
                     "Vehicle " + vehicleId + " is not AVAILABLE (current status: " + vehicle.getStatus() + ")");
         }
-        if (tripRepository.existsByVehicleIdAndStatus(vehicleId, TripStatus.EN_ROUTE)) {
+        if (tripRepository.existsByVehicleIdAndStatusIn(vehicleId, ACTIVE_STATUSES)) {
             throw new ConflictException("Vehicle " + vehicleId + " already has an active trip");
         }
 
@@ -80,6 +89,12 @@ public class TripService {
      * request. Kept a plain point-to-point arrival check so the write path
      * runs no spatial query.
      *
+     * <p>Accepts positions for a STALE trip too, not just EN_ROUTE — a
+     * paused trip resumes transparently the moment its feed comes back
+     * (real GPS drops happen for real reasons: tunnels, underpasses, dense
+     * urban canyons). The client sees this as an ordinary 200 with
+     * {@code status: EN_ROUTE}; there's no separate "resume" call.
+     *
      * <p>Uses the locking read ({@link TripRepository#findByIdForUpdate})
      * because this is a check-then-write on the same row the stall watchdog
      * and cancel() also check-then-write — see that method's Javadoc.
@@ -87,10 +102,14 @@ public class TripService {
     @Transactional
     public Trip updatePosition(UUID id, GeoPointDto positionDto) {
         Trip trip = getForUpdate(id);
-        if (trip.getStatus() != TripStatus.EN_ROUTE) {
+        if (!ACTIVE_STATUSES.contains(trip.getStatus())) {
             throw new ConflictException(
-                    "Trip " + id + " is not EN_ROUTE (current status: " + trip.getStatus()
-                            + "), cannot accept position updates");
+                    "Trip " + id + " is not accepting position updates (current status: " + trip.getStatus() + ")");
+        }
+
+        if (trip.getStatus() == TripStatus.STALE) {
+            log.info("Trip {} resumed (position received after being STALE)", id);
+            trip.setStatus(TripStatus.EN_ROUTE);
         }
 
         Point position = GeoPoints.fromDto(positionDto);
@@ -122,13 +141,19 @@ public class TripService {
     }
 
     /**
-     * Marks a stalled trip STALE and frees its vehicle. Called per-trip by
-     * the watchdog (a separate bean, so this @Transactional actually applies
-     * — a self-call would bypass the proxy). Uses the locking read and
-     * re-checks both status and the stall cutoff inside the transaction: a
-     * position may have committed after the watchdog's scan but before this
-     * call acquired the row lock, in which case the trip is no longer stale
-     * and must be left alone (see TripRepository#findByIdForUpdate).
+     * Pauses a trip whose feed has gone silent past the soft timeout.
+     * Deliberately NOT terminal: no completedAt, vehicle stays ON_TRIP — a
+     * paused trip still owns its vehicle, and {@link #updatePosition} will
+     * resume it the moment a position arrives again. The hard timeout
+     * ({@link #markExpired}) is what actually ends an unrecovered trip.
+     *
+     * <p>Called per-trip by the watchdog (a separate bean, so this
+     * @Transactional actually applies — a self-call would bypass the
+     * proxy). Uses the locking read and re-checks both status and the
+     * stall cutoff inside the transaction: a position may have committed
+     * after the watchdog's scan but before this call acquired the row
+     * lock, in which case the trip is no longer stale and must be left
+     * alone (see TripRepository#findByIdForUpdate).
      */
     @Transactional
     public void markStale(UUID id, Instant cutoff) {
@@ -136,22 +161,46 @@ public class TripService {
         if (trip == null || trip.getStatus() != TripStatus.EN_ROUTE) {
             return;
         }
-        Instant lastActivity = trip.getLastPositionAt() != null ? trip.getLastPositionAt() : trip.getCreatedAt();
-        if (lastActivity.isAfter(cutoff)) {
+        if (isFresherThan(trip, cutoff)) {
             return;
         }
         trip.setStatus(TripStatus.STALE);
+        tripRepository.save(trip);
+    }
+
+    /**
+     * Terminates a trip whose feed never resumed past the hard timeout.
+     * Unlike {@link #markStale}, this is terminal: completedAt is set and
+     * the vehicle is freed. Reachable from EN_ROUTE too (not just STALE) —
+     * a sweep delayed long enough for a trip to cross both cutoffs at once
+     * should go straight here rather than flicker through STALE first.
+     */
+    @Transactional
+    public void markExpired(UUID id, Instant cutoff) {
+        Trip trip = tripRepository.findByIdForUpdate(id).orElse(null);
+        if (trip == null || !ACTIVE_STATUSES.contains(trip.getStatus())) {
+            return;
+        }
+        if (isFresherThan(trip, cutoff)) {
+            return;
+        }
+        trip.setStatus(TripStatus.EXPIRED);
         trip.setCompletedAt(Instant.now());
         freeVehicleIfOnTrip(trip);
         tripRepository.save(trip);
     }
 
+    private boolean isFresherThan(Trip trip, Instant cutoff) {
+        Instant lastActivity = trip.getLastPositionAt() != null ? trip.getLastPositionAt() : trip.getCreatedAt();
+        return lastActivity.isAfter(cutoff);
+    }
+
     @Transactional
     public Trip cancel(UUID id) {
         Trip trip = getForUpdate(id);
-        if (trip.getStatus() != TripStatus.EN_ROUTE) {
+        if (!ACTIVE_STATUSES.contains(trip.getStatus())) {
             throw new ConflictException(
-                    "Trip " + id + " is not EN_ROUTE (current status: " + trip.getStatus() + "), cannot cancel");
+                    "Trip " + id + " is not active (current status: " + trip.getStatus() + "), cannot cancel");
         }
 
         trip.setStatus(TripStatus.CANCELLED);

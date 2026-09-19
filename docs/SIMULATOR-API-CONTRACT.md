@@ -55,7 +55,7 @@ to the backend, never to one another:
 | Geo point | `{"lat": <number -90..90>, "lng": <number -180..180>}` — plain lat/lng, **not** GeoJSON |
 | `VehicleType` | `AMBULANCE` \| `POLICE` \| `FIRE_ENGINE` |
 | `VehicleStatus` | `AVAILABLE` \| `ON_TRIP` \| `MAINTENANCE` \| `RETIRED` |
-| `TripStatus` | `EN_ROUTE` \| `ARRIVED` \| `CANCELLED` \| `STALE` (feed went silent — see C2/C3) |
+| `TripStatus` | `EN_ROUTE` \| `ARRIVED` \| `CANCELLED` \| `STALE` (feed silent, paused — recoverable, see C3/C4) \| `EXPIRED` (feed silent for too long — terminal, see C4) |
 | Device `type` | `TRAFFIC_SIGNAL` \| `LAMPPOST` |
 | Error body | RFC 7807: `{"title","status","detail","instance"}` |
 
@@ -101,15 +101,23 @@ flows back to the vehicle.
          "lastKnownPosition":{"lat":12.9750,"lng":77.6100},
          "completedAt":null}                         // set when ARRIVED
 ←  404  unknown trip id
-←  409  trip not EN_ROUTE (already ARRIVED/CANCELLED/STALE) — stop sending for it
+←  409  trip not accepting positions (already ARRIVED/CANCELLED/EXPIRED) — stop sending for it
 ←  400  lat/lng out of range
 ```
+**Resume behavior:** a trip that went `STALE` (see C4) is **not** terminal
+— posting a position to it succeeds (`200`) and the response's `status`
+flips straight back to `"EN_ROUTE"`. There is no separate "resume" call;
+if your mover just keeps sending on its normal cadence after a gap, the
+trip picks itself back up transparently. Only a trip that reached
+`ARRIVED`/`CANCELLED`/`EXPIRED` rejects further positions with `409`.
 
 ### W5 — Cancel a trip · **LIVE** · `POST /api/trips/{id}/cancel`
 For teardown / abandoning a run. Frees the vehicle back to `AVAILABLE`.
+Works on an `EN_ROUTE` trip **or** a currently-`STALE` (paused) one — you
+don't need to wait for a paused trip to resume or expire before cancelling it.
 ```
 ←  200  the trip, now "status":"CANCELLED"
-←  409  trip not EN_ROUTE (already terminal)
+←  409  trip already terminal (ARRIVED/CANCELLED/EXPIRED)
 ```
 
 ---
@@ -128,8 +136,9 @@ poller. To watch position/lifecycle progress in MVP-2, use W6.
 ### W6 — Plain trip read · **LIVE** · `GET /api/trips/{id}`
 Full trip incl. `routeGeometry`, `status`, and `lastKnownPosition`.
 `GET /api/trips?status=EN_ROUTE` lists active trips. This is how MVP-2
-progress is observed: POST positions (W3), watch `lastKnownPosition` move and
-`status` go `EN_ROUTE → ARRIVED` (or `→ STALE`).
+progress is observed: POST positions (W3), watch `lastKnownPosition` move
+and `status` go `EN_ROUTE → ARRIVED`, or `→ STALE → EN_ROUTE` (paused then
+resumed), or `→ STALE → EXPIRED` (paused, never resumed).
 
 ### W7 — Device commands · **MVP-3 (future)** · RabbitMQ (AMQP), **not HTTP**
 When alerting exists, device commands are **published to RabbitMQ**, keyed
@@ -166,15 +175,21 @@ yet finalized and will be appended here when MVP-3 is designed.
   within ~30 m of destination). The simulator learns of it via `status:
   "ARRIVED"` in the W3 ack, and must then stop sending positions for that
   trip. The vehicle is auto-freed to `AVAILABLE` on arrival.
-- **C3 — terminal trips reject positions.** Once `ARRIVED`, `CANCELLED`, or
-  `STALE`, W3 returns `409`. The mover should treat any `409`/`404` on W3 as
-  "stop tracking this trip."
-- **C4 — the stall watchdog.** If the backend receives no position for a
-  trip within its stale timeout (~45s, configurable), it marks the trip
-  `STALE` and frees the vehicle — so a dropped feed can't strand a
-  trip/vehicle. Keep sending on your chosen cadence (well under the timeout)
-  while a trip is live. A `STALE` trip is terminal (see C3); to resume after
-  a long gap, start a new trip. The generous timeout tolerates brief gaps.
+- **C3 — terminal trips reject positions; `STALE` does not.** Once
+  `ARRIVED`, `CANCELLED`, or `EXPIRED`, W3 returns `409` — the mover should
+  treat any `409`/`404` on W3 as "stop tracking this trip." `STALE` is
+  **not** terminal: W3 still returns `200` and resumes the trip (see W3's
+  "Resume behavior" above).
+- **C4 — the stall watchdog is two-tier.** If the backend receives no
+  position for a trip within its soft timeout (~120s, configurable), it
+  pauses the trip to `STALE` — the vehicle stays assigned (`ON_TRIP`), and
+  it is **not** freed for redispatch. Keep sending on your chosen cadence
+  (well under the timeout) while a trip is live; a brief gap (a real
+  tunnel, an underpass) recovers automatically the moment you resume
+  sending (C3). Only if the feed stays silent past the longer hard
+  timeout (~300s, configurable) does the backend give up: the trip flips
+  to `EXPIRED` (terminal) and the vehicle is freed. To resume after that
+  point, start a new trip.
 - **C5 — realistic test area.** The seeded real devices (405 traffic signals
   from OpenStreetMap) cover central Bengaluru, bounding box
   `12.95,77.57 → 13.00,77.65`. Keep origins/destinations inside it so that,
@@ -211,8 +226,18 @@ vehicle-mover                         backend
      │◄── 200 {status: ARRIVED} ─────────│   (vehicle auto-freed)
      │  stop.                              │
 ```
-If the mover stops before arriving, the backend's stall watchdog flips the
-trip to `STALE` and frees the vehicle after the timeout (C4).
+If the mover stops before arriving, the backend's stall watchdog pauses the
+trip to `STALE` after the soft timeout (C4) — the vehicle stays assigned.
+If positions resume before the hard timeout, the trip picks back up
+automatically:
+```
+     │  ... feed goes silent for a while ...             │
+     │  (backend pauses the trip to STALE at soft timeout)│
+     │  W3 POST .../T/position (resumed) ────────────────►│
+     │◄── 200 {status: EN_ROUTE} ─────────────────────────│   (back to normal)
+```
+If the feed never resumes past the hard timeout, the backend gives up:
+the trip flips to `EXPIRED` and the vehicle is freed for redispatch.
 
 ---
 
@@ -223,6 +248,7 @@ trip to `STALE` and frees the vehicle after the timeout (C4).
 | **LIVE** | Works against the running backend today (MVP-0 / MVP-1 / MVP-2). |
 | **MVP-3 (future)** | Design not finalized; placeholder so the simulator can plan its device-observer role. |
 
-*Last updated: 2026-09-19 (MVP-2 shipped: W3 live, W4 removed). Owns the
-boundary only; backend-internal design lives in `docs/HLD.md` and
-`docs/mvp-*/LLD-*.md`.*
+*Last updated: 2026-09-20 (stall detection made two-tier: `STALE` is now
+paused/recoverable, `EXPIRED` is the new terminal status — see C3/C4).
+Owns the boundary only; backend-internal design lives in `docs/HLD.md`
+and `docs/mvp-*/LLD-*.md`.*

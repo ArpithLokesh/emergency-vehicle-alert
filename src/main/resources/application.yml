@@ -40,6 +40,10 @@ caching:
 
 tracking:
   # How the backend tracks a vehicle through a trip. See TrackingProperties.
+  # Two-tier stall handling: STALE is a soft, recoverable pause (vehicle
+  # stays ON_TRIP, next position resumes the trip); EXPIRED is the hard,
+  # terminal end for a feed that never comes back.
   arrival-threshold-meters: 30      # within this of destination => ARRIVED
-  stale-timeout: 45s                # no position for this long => STALE (generous, survives GPS blips)
+  stale-timeout: 120s               # no position for this long => STALE (paused, e.g. a tunnel)
+  expire-timeout: 300s              # no position for this long => EXPIRED (terminal, frees vehicle)
   stale-check-interval: 15s         # how often the stall watchdog scans

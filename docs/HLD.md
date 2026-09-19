@@ -1,6 +1,6 @@
 # High-Level Design
 
-**Version:** 1.3.0
+**Version:** 1.4.0
 **Status:** MVP-0, MVP-1, MVP-2 implemented and verified end-to-end. MVP-3 (alerting/preemption) next.
 
 This is the single, living end-to-end HLD for the Emergency Vehicle Alert
@@ -49,10 +49,11 @@ what's actually built vs. still design-only.
 - **Device** — Lamppost + TrafficSignal registries (CRUD, active/inactive).
   ✅ Built, MVP-0. Spatial "devices along a route" query not yet built —
   see the happy-path correction below.
-- **Trip** — owns trip lifecycle (`EN_ROUTE`/`ARRIVED`/`CANCELLED`/`STALE`),
-  the entry point dispatcher calls hit. ✅ Built, MVP-1 (creation + cancel);
-  MVP-2 added position ingestion, arrival detection (`→ ARRIVED`), and the
-  stall watchdog (`→ STALE`).
+- **Trip** — owns trip lifecycle
+  (`EN_ROUTE`/`ARRIVED`/`CANCELLED`/`STALE`/`EXPIRED`), the entry point
+  dispatcher calls hit. ✅ Built, MVP-1 (creation + cancel); MVP-2 added
+  position ingestion, arrival detection (`→ ARRIVED`), and a two-tier
+  stall watchdog (`→ STALE` soft/recoverable, `→ EXPIRED` hard/terminal).
 - **Routing** — talks to OSRM, stores route geometry, owns the Caffeine
   route-response cache. ✅ Built, MVP-1. The "devices near the vehicle"
   proximity query is **not** here — it's alerting-internal (MVP-3), see
@@ -111,11 +112,16 @@ preemption) are the designed target for MVP-3, not yet implemented.
    a destination-proximity check (Java Haversine, point-to-point), **not** a
    traveled-distance-along-route check, which would silently break on any
    real-world detour. Frees the vehicle to `AVAILABLE`. ✅
-9. **Stall watchdog**: if no position arrives for `staleTimeout` (~45s,
-   configurable), the trip flips to `STALE` and the vehicle is freed — so a
-   dropped feed can't strand a trip/vehicle forever. The one scheduled job
-   in an otherwise-reactive backend, present precisely to detect the
-   *absence* of the feed. ✅
+9. **Stall watchdog, two-tier**: if no position arrives for `staleTimeout`
+   (~120s, configurable), the trip flips to `STALE` — **paused, not
+   terminal**: the vehicle stays `ON_TRIP`, and the next position update
+   resumes the trip straight back to `EN_ROUTE`. Only if silence continues
+   past `expireTimeout` (~300s) does the trip flip to `EXPIRED` (terminal)
+   and the vehicle get freed. This tolerates a real GPS blackout (tunnel,
+   underpass, dense-urban canyon) without stranding a live emergency
+   response, while a genuinely dead feed still eventually frees the
+   vehicle. The one scheduled job in an otherwise-reactive backend,
+   present precisely to detect the *absence* of the feed. ✅
 
 Dispatcher can also cancel a trip (`EN_ROUTE → CANCELLED`) at any point —
 built, MVP-1.
@@ -154,14 +160,26 @@ built, MVP-1.
   back in MVP-2** (+ `last_position_at`) once position ingestion and stall
   detection actually needed them — the trim-until-needed discipline working
   as intended.
-- **Stall detection** (MVP-2): a `@Scheduled` watchdog marks `EN_ROUTE`
-  trips `STALE` (and frees the vehicle) after `staleTimeout` of silence,
-  using `COALESCE(last_position_at, created_at)` so it catches both a feed
-  that died mid-trip and one that never started. This is the *only*
-  scheduled job in the backend — justified because detecting the *absence*
-  of input is the one thing a purely reactive design cannot do on its own.
-  `STALE` is a distinct terminal status from `CANCELLED` (system-detected
-  loss vs. operator action — matters for audit). ✅
+- **Stall detection is two-tier** (MVP-2, revised after MVP-2 shipped): a
+  `@Scheduled` watchdog marks `EN_ROUTE` trips `STALE` after `staleTimeout`
+  of silence, using `COALESCE(last_position_at, created_at)` so it catches
+  both a feed that died mid-trip and one that never started. **`STALE` is
+  deliberately not terminal** — real GPS feeds drop for real reasons
+  (tunnels, underpasses, dense-urban canyons) that don't mean the run is
+  over, so the vehicle stays `ON_TRIP` and the next position update
+  resumes the trip transparently back to `EN_ROUTE`. Only after a second,
+  longer `expireTimeout` of continued silence does the trip flip to
+  `EXPIRED` (terminal, frees the vehicle) — reachable directly from
+  `EN_ROUTE` too, so a watchdog sweep delayed long enough to cross both
+  cutoffs at once goes straight to `EXPIRED` rather than flicker through
+  `STALE` first. This is the *only* scheduled job in the backend —
+  justified because detecting the *absence* of input is the one thing a
+  purely reactive design cannot do on its own. `EXPIRED` is the terminal
+  status distinct from operator `CANCELLED` (system-detected loss vs.
+  operator action — matters for audit); `STALE` is a paused in-between
+  state, not a terminal one. The original single-tier design (`STALE`
+  terminal at 45s) shipped in MVP-2 and was revised immediately after
+  real-world review. ✅
 - **Caching**: Spring's cache abstraction (`@Cacheable`) backed by
   Caffeine (in-memory), fitting the single-instance/no-HA deployment
   model. Swappable to Redis later by changing only the `CacheManager`
@@ -203,3 +221,4 @@ built, MVP-1.
 | 1.1.0 | 2026-09-14 | MVP-1 implemented: Trip + Routing + Caching. Corrected happy-path step 3 (device-along-route query deferred to MVP-3). Written as a separate delta file at the time (`docs/mvp-1/HLD.md`). |
 | 1.2.0 | 2026-09-17 | **Consolidated back into a single document.** The mvp-0/mvp-1 HLD-delta-file split made the current end-to-end design hard to see without reading and merging multiple files — reverted. `docs/mvp-0/HLD.md` and `docs/mvp-1/HLD.md` are retired; this file is the sole HLD going forward. Also folded in the config-externalization decision (`RoutingProperties`/`OsrmCacheProperties`) that had been implemented after `docs/mvp-1/HLD.md` was last written and had no HLD home. LLDs remain per-MVP-stage (`docs/mvp-N/LLD-*.md`) — unaffected by this change. |
 | 1.3.0 | 2026-09-19 | MVP-2 implemented + several decisions reshaped. Vehicle simulator is **external** (backend reactive, no in-process sim). Position component built: ingestion endpoint, destination-proximity arrival, and a stall watchdog (`STALE` status). Component wiring **reversed** to async post-commit events (from the earlier direct-call plan). Device-proximity/ETA is **alerting-internal (MVP-3)**, not a public endpoint — no `nearby-devices` API. Trip regained `last_known_position` + `last_position_at`. |
+| 1.4.0 | 2026-09-20 | **Stall detection made two-tier.** `STALE` (45s single-tier, terminal) revised almost immediately after real-world review: a real GPS blackout (tunnel, underpass, urban canyon) shouldn't strand a live emergency response. `STALE` is now a **paused, non-terminal** state (~120s, vehicle stays `ON_TRIP`, next position resumes transparently to `EN_ROUTE`); a new `EXPIRED` status (~300s) is the actual terminal outcome for a feed that never comes back. `cancel()` now accepts `STALE` trips too. Simulator contract (C3/C4) and MVP-2 LLD updated to match. |
