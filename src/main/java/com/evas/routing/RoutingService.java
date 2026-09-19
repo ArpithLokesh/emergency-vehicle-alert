@@ -66,7 +66,17 @@ public class RoutingService {
         if (response == null || response.routes() == null || response.routes().isEmpty()) {
             throw new RoutingException("OSRM returned no route for " + coordinates);
         }
+        if (!"Ok".equals(response.code())) {
+            throw new RoutingException("OSRM returned code " + response.code() + " for " + coordinates);
+        }
 
-        return GeoPoints.lineStringFromLngLatPairs(response.routes().get(0).geometry().coordinates());
+        OsrmRoute route = response.routes().get(0);
+        if (route.geometry() == null
+                || route.geometry().coordinates() == null
+                || route.geometry().coordinates().size() < 2) {
+            throw new RoutingException("OSRM returned no usable geometry for " + coordinates);
+        }
+
+        return GeoPoints.lineStringFromLngLatPairs(route.geometry().coordinates());
     }
 }

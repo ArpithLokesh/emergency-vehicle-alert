@@ -79,10 +79,14 @@ public class TripService {
      * (MVP-3), reacting asynchronously to position changes, not this
      * request. Kept a plain point-to-point arrival check so the write path
      * runs no spatial query.
+     *
+     * <p>Uses the locking read ({@link TripRepository#findByIdForUpdate})
+     * because this is a check-then-write on the same row the stall watchdog
+     * and cancel() also check-then-write — see that method's Javadoc.
      */
     @Transactional
     public Trip updatePosition(UUID id, GeoPointDto positionDto) {
-        Trip trip = get(id);
+        Trip trip = getForUpdate(id);
         if (trip.getStatus() != TripStatus.EN_ROUTE) {
             throw new ConflictException(
                     "Trip " + id + " is not EN_ROUTE (current status: " + trip.getStatus()
@@ -97,9 +101,7 @@ public class TripService {
                 <= trackingProperties.arrivalThresholdMeters()) {
             trip.setStatus(TripStatus.ARRIVED);
             trip.setCompletedAt(Instant.now());
-            Vehicle vehicle = trip.getVehicle();
-            vehicle.setStatus(VehicleStatus.AVAILABLE);
-            vehicleRepository.save(vehicle);
+            freeVehicleIfOnTrip(trip);
         }
 
         return tripRepository.save(trip);
@@ -110,6 +112,11 @@ public class TripService {
                 .orElseThrow(() -> new NotFoundException("Trip " + id + " not found"));
     }
 
+    private Trip getForUpdate(UUID id) {
+        return tripRepository.findByIdForUpdate(id)
+                .orElseThrow(() -> new NotFoundException("Trip " + id + " not found"));
+    }
+
     public List<Trip> list(TripStatus status) {
         return status != null ? tripRepository.findByStatus(status) : tripRepository.findAll();
     }
@@ -117,28 +124,31 @@ public class TripService {
     /**
      * Marks a stalled trip STALE and frees its vehicle. Called per-trip by
      * the watchdog (a separate bean, so this @Transactional actually applies
-     * — a self-call would bypass the proxy). Re-checks EN_ROUTE inside the
-     * transaction: the trip may have ARRIVED or been CANCELLED between the
-     * watchdog's scan and this call, in which case we leave it alone.
+     * — a self-call would bypass the proxy). Uses the locking read and
+     * re-checks both status and the stall cutoff inside the transaction: a
+     * position may have committed after the watchdog's scan but before this
+     * call acquired the row lock, in which case the trip is no longer stale
+     * and must be left alone (see TripRepository#findByIdForUpdate).
      */
     @Transactional
-    public void markStale(UUID id) {
-        Trip trip = tripRepository.findById(id).orElse(null);
+    public void markStale(UUID id, Instant cutoff) {
+        Trip trip = tripRepository.findByIdForUpdate(id).orElse(null);
         if (trip == null || trip.getStatus() != TripStatus.EN_ROUTE) {
+            return;
+        }
+        Instant lastActivity = trip.getLastPositionAt() != null ? trip.getLastPositionAt() : trip.getCreatedAt();
+        if (lastActivity.isAfter(cutoff)) {
             return;
         }
         trip.setStatus(TripStatus.STALE);
         trip.setCompletedAt(Instant.now());
+        freeVehicleIfOnTrip(trip);
         tripRepository.save(trip);
-
-        Vehicle vehicle = trip.getVehicle();
-        vehicle.setStatus(VehicleStatus.AVAILABLE);
-        vehicleRepository.save(vehicle);
     }
 
     @Transactional
     public Trip cancel(UUID id) {
-        Trip trip = get(id);
+        Trip trip = getForUpdate(id);
         if (trip.getStatus() != TripStatus.EN_ROUTE) {
             throw new ConflictException(
                     "Trip " + id + " is not EN_ROUTE (current status: " + trip.getStatus() + "), cannot cancel");
@@ -146,12 +156,23 @@ public class TripService {
 
         trip.setStatus(TripStatus.CANCELLED);
         trip.setCompletedAt(Instant.now());
+        freeVehicleIfOnTrip(trip);
         tripRepository.save(trip);
 
-        Vehicle vehicle = trip.getVehicle();
-        vehicle.setStatus(VehicleStatus.AVAILABLE);
-        vehicleRepository.save(vehicle);
-
         return trip;
+    }
+
+    /**
+     * Frees the vehicle back to AVAILABLE only if it's currently ON_TRIP.
+     * Without this guard, every terminal path unconditionally overwrote
+     * vehicle status — silently undoing an operator's manual MAINTENANCE or
+     * RETIRED change made mid-trip.
+     */
+    private void freeVehicleIfOnTrip(Trip trip) {
+        Vehicle vehicle = trip.getVehicle();
+        if (vehicle.getStatus() == VehicleStatus.ON_TRIP) {
+            vehicle.setStatus(VehicleStatus.AVAILABLE);
+            vehicleRepository.save(vehicle);
+        }
     }
 }

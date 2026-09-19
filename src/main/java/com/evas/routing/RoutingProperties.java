@@ -1,7 +1,9 @@
 package com.evas.routing;
 
+import jakarta.validation.constraints.NotBlank;
 import java.time.Duration;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.validation.annotation.Validated;
 
 /**
  * Binds the {@code routing.*} section of application.yml. {@code @ConfigurationProperties}
@@ -14,10 +16,16 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * <p>The compact constructor below supplies defaults for anything YAML
  * doesn't set — so swapping to a different OSRM server only ever means
  * editing application.yml, never this class.
+ *
+ * <p>{@code @Validated} + {@code @NotBlank} makes a missing/blank
+ * {@code osrm-base-url} fail application startup with a clear message,
+ * instead of booting fine and only failing obscurely on the first trip
+ * creation request.
  */
+@Validated
 @ConfigurationProperties(prefix = "routing")
 public record RoutingProperties(
-        String osrmBaseUrl,
+        @NotBlank String osrmBaseUrl,
         String profile,
         Duration connectTimeout,
         Duration readTimeout

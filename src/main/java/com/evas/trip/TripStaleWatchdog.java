@@ -39,7 +39,7 @@ public class TripStaleWatchdog {
         }
         for (Trip trip : stale) {
             try {
-                tripService.markStale(trip.getId());
+                tripService.markStale(trip.getId(), cutoff);
             } catch (Exception e) {
                 log.warn("Failed to mark trip {} STALE, will retry next sweep", trip.getId(), e);
             }
