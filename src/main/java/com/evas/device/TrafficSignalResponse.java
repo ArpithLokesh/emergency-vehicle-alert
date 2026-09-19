@@ -8,6 +8,7 @@ public record TrafficSignalResponse(
         UUID id,
         String code,
         GeoPointDto location,
+        String routingKey,
         boolean active
 ) {
     public static TrafficSignalResponse from(TrafficSignal signal) {
@@ -15,6 +16,7 @@ public record TrafficSignalResponse(
                 signal.getId(),
                 signal.getCode(),
                 GeoPoints.toDto(signal.getLocation()),
+                signal.getRoutingKey(),
                 signal.isActive());
     }
 }

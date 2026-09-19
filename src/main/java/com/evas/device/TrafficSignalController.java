@@ -30,6 +30,7 @@ public class TrafficSignalController {
         TrafficSignal signal = TrafficSignal.builder()
                 .code(request.code())
                 .location(GeoPoints.fromDto(request.location()))
+                .routingKey(request.routingKey())
                 .build();
         return TrafficSignalResponse.from(trafficSignalRepository.save(signal));
     }
@@ -55,6 +56,9 @@ public class TrafficSignalController {
         }
         if (request.location() != null) {
             signal.setLocation(GeoPoints.fromDto(request.location()));
+        }
+        if (request.routingKey() != null) {
+            signal.setRoutingKey(request.routingKey());
         }
         if (request.active() != null) {
             signal.setActive(request.active());

@@ -14,10 +14,11 @@ import org.hibernate.annotations.UuidGenerator;
 import org.locationtech.jts.geom.Point;
 
 /**
- * A controllable traffic signal at a junction. Deliberately minimal —
- * approach-direction metadata, the signal state machine, and any
- * command-delivery field are designed later, alongside the Preemption
- * engine (MVP-3). See docs/mvp-0/LLD-data-model.md.
+ * A controllable traffic signal at a junction. Approach-direction metadata
+ * and the signal's own state machine are still out of scope — but it now
+ * carries a RabbitMQ {@code routingKey} (added alongside Lamppost's) since
+ * the Preemption engine addresses devices by that field, not by id.
+ * See docs/mvp-0/LLD-data-model.md.
  */
 @Entity
 @Table(name = "traffic_signal")
@@ -37,6 +38,9 @@ public class TrafficSignal {
 
     @Column(nullable = false, columnDefinition = "geometry(Point,4326)")
     private Point location;
+
+    @Column(name = "routing_key", nullable = false, unique = true, length = 128)
+    private String routingKey;
 
     @Builder.Default
     @Column(nullable = false)

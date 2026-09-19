@@ -7,6 +7,7 @@ import jakarta.validation.constraints.NotNull;
 
 public record TrafficSignalCreateRequest(
         @NotBlank String code,
-        @NotNull @Valid GeoPointDto location
+        @NotNull @Valid GeoPointDto location,
+        @NotBlank String routingKey
 ) {
 }

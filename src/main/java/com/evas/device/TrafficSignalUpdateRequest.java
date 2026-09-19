@@ -6,6 +6,7 @@ import com.evas.common.GeoPointDto;
 public record TrafficSignalUpdateRequest(
         String code,
         GeoPointDto location,
+        String routingKey,
         Boolean active
 ) {
 }

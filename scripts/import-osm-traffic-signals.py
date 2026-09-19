@@ -44,6 +44,7 @@ def import_signal(api_base, osm_id, lat, lon):
     body = json.dumps({
         "code": f"TS-OSM-{osm_id}",
         "location": {"lat": lat, "lng": lon},
+        "routingKey": f"signal.TS-OSM-{osm_id}",
     }).encode()
     req = urllib.request.Request(
         f"{api_base}/api/traffic-signals",

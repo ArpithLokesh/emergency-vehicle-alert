@@ -42,6 +42,20 @@
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-webmvc</artifactId>
 		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-amqp</artifactId>
+		</dependency>
+		<!-- spring-amqp's Jackson2JsonMessageConverter uses classic Jackson 2.x
+			 (com.fasterxml.jackson), a different major version from the app's
+			 own Jackson 3.x (tools.jackson, via spring-boot-starter-jackson) —
+			 the two ObjectMapper types are unrelated and can't be shared. This
+			 module lets that Jackson 2.x instance serialize java.time types
+			 (Instant) instead of throwing "type not supported". -->
+		<dependency>
+			<groupId>com.fasterxml.jackson.datatype</groupId>
+			<artifactId>jackson-datatype-jsr310</artifactId>
+		</dependency>
 
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
