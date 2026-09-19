@@ -9,5 +9,7 @@ public enum RevertReason {
     /** The trip ended (CANCELLED, ARRIVED, or EXPIRED). */
     TRIP_TERMINATED,
     /** The trip's feed went silent (STALE) — reverted safety-first; may re-preempt on resume. */
-    TRIP_PAUSED
+    TRIP_PAUSED,
+    /** The signal fell out of the tracked window for a reason other than a normal pass — a route deviation dropped it, or it was deactivated mid-approach. */
+    WINDOW_CHANGED
 }

@@ -6,6 +6,8 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import org.locationtech.jts.geom.LineString;
+import org.locationtech.jts.geom.Point;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
@@ -67,4 +69,26 @@ public interface    TripRepository extends JpaRepository<Trip, UUID> {
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("SELECT t FROM Trip t WHERE t.id = :id")
     Optional<Trip> findByIdForUpdate(@Param("id") UUID id);
+
+    // The three queries below are pure geometry math with no FROM clause —
+    // they don't touch the trip table at all, just take a route/point as
+    // parameters. They live here rather than in a spatial utility class
+    // because JTS has no geodesic (real-world-metre) equivalent of any of
+    // them; PostGIS's geography-aware functions are the only correct source
+    // for "how far in actual metres", the same reason GeoPoints.distanceMeters
+    // hand-rolls Haversine instead of using JTS's own (planar) distance().
+    // Used by the alerting engine (com.evas.alerting) to reason about a
+    // vehicle's and a device's position along a trip's route.
+
+    /** 0..1 fraction of how far along {@code route} the closest point to {@code point} is. */
+    @Query(value = "SELECT ST_LineLocatePoint(CAST(:route AS geometry), CAST(:point AS geometry))", nativeQuery = true)
+    double fractionAlongRoute(@Param("route") LineString route, @Param("point") Point point);
+
+    /** Real-world length of {@code route} in metres. */
+    @Query(value = "SELECT ST_Length(CAST(:route AS geography))", nativeQuery = true)
+    double routeLengthMeters(@Param("route") LineString route);
+
+    /** Real-world distance in metres from {@code point} to the nearest point on {@code route}. */
+    @Query(value = "SELECT ST_Distance(CAST(:route AS geography), CAST(:point AS geography))", nativeQuery = true)
+    double distanceToRouteMeters(@Param("route") LineString route, @Param("point") Point point);
 }

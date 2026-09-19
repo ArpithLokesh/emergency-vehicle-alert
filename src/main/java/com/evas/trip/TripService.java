@@ -5,6 +5,9 @@ import com.evas.common.GeoPointDto;
 import com.evas.common.GeoPoints;
 import com.evas.common.NotFoundException;
 import com.evas.routing.RoutingService;
+import com.evas.trip.events.PositionUpdatedEvent;
+import com.evas.trip.events.TripTerminatedEvent;
+import com.evas.trip.events.TripTerminationReason;
 import com.evas.vehicle.Vehicle;
 import com.evas.vehicle.VehicleRepository;
 import com.evas.vehicle.VehicleStatus;
@@ -18,6 +21,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.locationtech.jts.geom.LineString;
 import org.locationtech.jts.geom.Point;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -40,6 +44,7 @@ public class TripService {
     private final VehicleRepository vehicleRepository;
     private final RoutingService routingService;
     private final TrackingProperties trackingProperties;
+    private final ApplicationEventPublisher eventPublisher;
 
     /**
      * @Transactional here matters: creating a trip touches two tables
@@ -116,14 +121,27 @@ public class TripService {
         trip.setLastKnownPosition(position);
         trip.setLastPositionAt(Instant.now());
 
-        if (GeoPoints.distanceMeters(position, trip.getDestination())
-                <= trackingProperties.arrivalThresholdMeters()) {
+        boolean arrived = GeoPoints.distanceMeters(position, trip.getDestination())
+                <= trackingProperties.arrivalThresholdMeters();
+        if (arrived) {
             trip.setStatus(TripStatus.ARRIVED);
             trip.setCompletedAt(Instant.now());
             freeVehicleIfOnTrip(trip);
         }
 
-        return tripRepository.save(trip);
+        trip = tripRepository.save(trip);
+
+        // Arrival is terminal — publish the reset event instead of a plain
+        // position update, so alerting reverts/clears everything rather
+        // than running one more evaluate() tick against a trip that's
+        // already done.
+        if (arrived) {
+            eventPublisher.publishEvent(new TripTerminatedEvent(trip.getId(), TripTerminationReason.ARRIVED));
+        } else {
+            eventPublisher.publishEvent(new PositionUpdatedEvent(trip.getId()));
+        }
+
+        return trip;
     }
 
     public Trip get(UUID id) {
@@ -166,6 +184,7 @@ public class TripService {
         }
         trip.setStatus(TripStatus.STALE);
         tripRepository.save(trip);
+        eventPublisher.publishEvent(new TripTerminatedEvent(trip.getId(), TripTerminationReason.PAUSED));
     }
 
     /**
@@ -188,6 +207,7 @@ public class TripService {
         trip.setCompletedAt(Instant.now());
         freeVehicleIfOnTrip(trip);
         tripRepository.save(trip);
+        eventPublisher.publishEvent(new TripTerminatedEvent(trip.getId(), TripTerminationReason.EXPIRED));
     }
 
     private boolean isFresherThan(Trip trip, Instant cutoff) {
@@ -206,7 +226,8 @@ public class TripService {
         trip.setStatus(TripStatus.CANCELLED);
         trip.setCompletedAt(Instant.now());
         freeVehicleIfOnTrip(trip);
-        tripRepository.save(trip);
+        trip = tripRepository.save(trip);
+        eventPublisher.publishEvent(new TripTerminatedEvent(trip.getId(), TripTerminationReason.CANCELLED));
 
         return trip;
     }
