@@ -5,9 +5,9 @@ and the EVAS backend — the wires in and out, not how either side is built
 internally. The simulator author builds to this; the backend is built to
 match it. It is the shared source of truth for the integration.
 
-Scope note: some wires are **live today**, some are the **agreed contract
-for MVP-2** (I build the backend to this while you build the simulator to
-it — we meet in the middle), and one is **MVP-3 (future)**. Each is tagged.
+Scope note: every wire below is **LIVE** — MVP-3 (alerting) is built and
+verified, including the RabbitMQ device-command streams. See the status
+legend at the bottom.
 
 ```
                  ┌──────────────────────────────┐
@@ -19,7 +19,7 @@ it — we meet in the middle), and one is **MVP-3 (future)**. Each is tagged.
    (ack out)   ◄──┼─────────────                  │
    (trip read) ◄──┼─────────────                  │
                   │                              │
-   device alerts ◄┼───(RabbitMQ, MVP-3)──────────│
+   device alerts ◄┼───(RabbitMQ, live)───────────│
                  └──────────────────────────────┘
    simulator                       backend
    (two roles: vehicle-mover + device-observer)
@@ -30,9 +30,10 @@ The simulator plays **two independent roles** that never talk to each other
 to the backend, never to one another:
 
 - **Vehicle-mover** — creates trips, streams positions, reads acks.
-- **Device-observer** — receives device alerts over RabbitMQ (MVP-3 only).
-  It has nothing to do in MVP-2: there is no nearby-devices HTTP wire (that
-  logic is alerting-internal — see W4, removed).
+- **Device-observer** — receives device alerts over RabbitMQ (W7, live).
+  There is no nearby-devices HTTP wire — that logic is alerting-internal
+  (see W4, removed); the device-observer's only signal is what arrives on
+  its bound queue.
 
 ---
 
@@ -44,7 +45,7 @@ to the backend, never to one another:
 | Format | JSON over HTTP |
 | Auth | none (authentication is a later milestone) |
 | Backend prerequisites | app running; Docker infra up (`evas-postgres`, `evas-rabbitmq`) |
-| RabbitMQ (MVP-3) | AMQP `localhost:5672`, management UI `localhost:15672`, user/pass `evas`/`evas` |
+| RabbitMQ | AMQP `localhost:5672`, management UI `localhost:15672`, user/pass `evas`/`evas` |
 
 ---
 
@@ -127,41 +128,84 @@ don't need to wait for a paused trip to resume or expire before cancelling it.
 ### ~~W4 — Nearby-device ETAs~~ · **REMOVED — there is no such wire**
 Earlier drafts had a `GET /api/trips/{id}/nearby-devices` read for observing
 "shrinking ETAs." It was cut: "which devices is the vehicle approaching" is
-*internal* logic of the alerting engine (MVP-3), not a public endpoint —
-computed server-side to decide whom to alert, never exposed as a read and
-never returned to the vehicle. The simulator observes alerting **only** via
-the device alerts on RabbitMQ (W7, MVP-3). Do not build a nearby-devices
-poller. To watch position/lifecycle progress in MVP-2, use W6.
+*internal* logic of the alerting engine, not a public endpoint — computed
+server-side to decide whom to alert, never exposed as a read and never
+returned to the vehicle. The simulator observes alerting **only** via the
+device alerts on RabbitMQ (W7). Do not build a nearby-devices poller. To
+watch position/lifecycle progress, use W6.
 
 ### W6 — Plain trip read · **LIVE** · `GET /api/trips/{id}`
 Full trip incl. `routeGeometry`, `status`, and `lastKnownPosition`.
-`GET /api/trips?status=EN_ROUTE` lists active trips. This is how MVP-2
+`GET /api/trips?status=EN_ROUTE` lists active trips. This is how trip
 progress is observed: POST positions (W3), watch `lastKnownPosition` move
 and `status` go `EN_ROUTE → ARRIVED`, or `→ STALE → EN_ROUTE` (paused then
 resumed), or `→ STALE → EXPIRED` (paused, never resumed).
 
-### W7 — Device commands · **MVP-3 (future)** · RabbitMQ (AMQP), **not HTTP**
-When alerting exists, device commands are **published to RabbitMQ**, keyed
-per device. This is **two distinct message streams**, because the two device
-kinds are commanded differently — the fake-device consumers behave
-differently per kind:
+### W7 — Device commands · **LIVE** · RabbitMQ (AMQP), **not HTTP**
+Device commands are published to one durable **topic exchange**,
+`evas.device.commands`. The backend only ever publishes here — it never
+declares or binds a queue. To observe traffic, the device-observer (or a
+debug consumer) declares its own queue and binds it to this exchange with
+whatever routing-key pattern it wants (`#` catches everything).
+
+**Routing key** = the target device's own `routing_key`, exactly as set
+when the device was registered — `POST /api/lampposts` always required a
+`routingKey` field, and `POST /api/traffic-signals` now does too. A
+sensible convention if you're seeding your own test devices:
+`signal.<code>` / `lamppost.<code>`, but the backend treats it as an
+opaque string — bind however you like.
+
+This is **two distinct message streams**, because the two device kinds are
+commanded differently — the fake-device consumers behave differently per
+kind:
 
 - **W7a — Traffic-signal preemption** (target: `TRAFFIC_SIGNAL`). A
-  **stateful pair**: a *force-green* command for the vehicle's approach
-  direction, then later a *revert-to-normal* command once the vehicle has
-  passed (or a safety timeout fires). A fake signal must model both — go
-  green on the first, restore its prior state on the second. Backed by the
-  `Preemption` engine / `SignalPreemption` record.
-- **W7b — Emitter broadcast** (target: `LAMPPOST`). A **fire-once**
-  *broadcast-make-way* alert the emitter would push to nearby cars over
-  LiFi. No revert — it simply expires once the vehicle passes. A fake
-  lamppost just logs/emits it. Backed by the `Alerting` engine /
-  `LamppostAlert` record.
+  **stateful, edge-triggered pair**: one `SIGNAL_PREEMPTION_ACTIVATE` when
+  the vehicle enters trigger distance, later exactly one
+  `SIGNAL_PREEMPTION_REVERT` — on a normal pass, on the trip
+  ending/pausing, or from the backend's own safety-timeout sweep if
+  nothing else reverted it within ~120s. A fake signal must model both —
+  go green on ACTIVATE, restore prior state on REVERT. Idempotent per
+  (trip, signal) while active — never two ACTIVATEs in a row without a
+  REVERT between them — but a **paused-then-resumed** trip can
+  legitimately re-preempt the same signal (a fresh ACTIVATE after an
+  earlier REVERT), so don't assume "one activate ever" for a given
+  (trip, signal) pair.
+  ```json
+  ACTIVATE  {"type":"SIGNAL_PREEMPTION_ACTIVATE","tripId":"<uuid>","signalId":"<uuid>",
+             "distanceM":184.3,"vehicleType":"AMBULANCE","issuedAt":"<epoch-seconds-decimal>"}
+  REVERT    {"type":"SIGNAL_PREEMPTION_REVERT","tripId":"<uuid>","signalId":"<uuid>",
+             "reason":"PASSED","issuedAt":"<epoch-seconds-decimal>"}
+  ```
+  `reason` is one of `PASSED` \| `TIMEOUT` \| `TRIP_TERMINATED` \|
+  `TRIP_PAUSED` \| `WINDOW_CHANGED` (the last is a route deviation
+  dropping the signal from tracking, or the signal being deactivated
+  mid-approach) — informational only, a fake signal doesn't need to branch
+  on it, just revert.
+- **W7b — Lamppost broadcast** (target: `LAMPPOST`). **Level-triggered,
+  not fire-once**: `LAMPPOST_APPROACH` is sent on **every** position tick
+  while the lamppost is in the vehicle's tracking window, carrying the
+  current along-route distance (not ETA — no speed model). A fake
+  lamppost re-broadcasts this to nearby cars over LiFi each time it
+  arrives; expect a steady stream of decreasing `distanceM` values, not a
+  single message. Exactly one `LAMPPOST_CLEAR` follows once the vehicle
+  passes, the trip ends/pauses, or the lamppost is deactivated.
+  ```json
+  APPROACH  {"type":"LAMPPOST_APPROACH","tripId":"<uuid>","lamppostId":"<uuid>",
+             "distanceM":92.5,"vehicleType":"AMBULANCE","issuedAt":"<epoch-seconds-decimal>"}
+  CLEAR     {"type":"LAMPPOST_CLEAR","tripId":"<uuid>","lamppostId":"<uuid>",
+             "issuedAt":"<epoch-seconds-decimal>"}
+  ```
+
+All four message types carry a `type` field as the discriminator (also set
+as the AMQP header `__TypeId__`, but branch on the JSON body's `type` field
+— it's the stable contract, the header is a Spring artifact). `issuedAt` is
+a server-clock timestamp, decimal epoch seconds (Jackson's default
+`Instant` serialization) — not an ISO-8601 string like the HTTP wires use.
 
 HTTP tools (Postman) cannot read this wire — use an AMQP consumer, or the
-management UI at `localhost:15672` for manual inspection. Exact
-exchange/queue/routing-key topology and payload fields for W7a/W7b are not
-yet finalized and will be appended here when MVP-3 is designed.
+management UI at `localhost:15672` (Queues → your queue → **Get messages**)
+for manual inspection.
 
 ---
 
@@ -192,8 +236,20 @@ yet finalized and will be appended here when MVP-3 is designed.
   point, start a new trip.
 - **C5 — realistic test area.** The seeded real devices (405 traffic signals
   from OpenStreetMap) cover central Bengaluru, bounding box
-  `12.95,77.57 → 13.00,77.65`. Keep origins/destinations inside it so that,
-  in MVP-3, the vehicle actually passes real devices to alert.
+  `12.95,77.57 → 13.00,77.65`. Keep origins/destinations inside it so the
+  vehicle actually passes real devices to alert — verified end-to-end
+  against this exact data (a route through it produced dozens of real
+  ACTIVATE/REVERT cycles). Lampposts are not seeded in bulk the way
+  signals are (no import script exists yet) — register a few of your own
+  near your test route via `POST /api/lampposts` if you want to exercise
+  W7b.
+- **C6 — device windows are bounded, not exhaustive.** The backend tracks
+  only the next few devices ahead of the vehicle per type (a small rolling
+  window, not every device within some radius) — so don't expect a
+  broadcast the instant a device comes into physical range if the vehicle
+  is still passing several closer devices of the same type first. This
+  only matters in unusually device-dense areas; anywhere realistic, it's
+  unnoticeable.
 
 ---
 
@@ -212,7 +268,7 @@ The simulator should branch on `status` (the HTTP code), and can surface
 
 ## End-to-end sequence (one trip)
 
-MVP-2 (device-observer idle until MVP-3's RabbitMQ alerts exist):
+Vehicle-mover side:
 ```
 vehicle-mover                         backend
      │  W1 POST /api/vehicles ──────────►│
@@ -239,16 +295,38 @@ automatically:
 If the feed never resumes past the hard timeout, the backend gives up:
 the trip flips to `EXPIRED` and the vehicle is freed for redispatch.
 
+Device-observer side, watching the **same trip** concurrently over W7 —
+each device only sees traffic once the vehicle enters its trigger/tracking
+distance, driven purely by the position stream above, never polled:
+```
+device-observer (bound to its own routing key)      backend
+     │                                                    │
+     │  ... vehicle approaches, several W3 ticks pass ...  │
+     │◄──────────── SIGNAL_PREEMPTION_ACTIVATE ───────────│   (signal enters trigger distance)
+     │◄──────────── LAMPPOST_APPROACH (dist=310m) ────────│   (lamppost enters window)
+     │◄──────────── LAMPPOST_APPROACH (dist=180m) ────────│   (repeats every tick, decreasing)
+     │◄──────────── LAMPPOST_APPROACH (dist=40m) ─────────│
+     │◄──────────── LAMPPOST_CLEAR ───────────────────────│   (vehicle passed the lamppost)
+     │◄──────────── SIGNAL_PREEMPTION_REVERT (PASSED) ────│   (vehicle passed the signal)
+```
+If the trip is cancelled, arrives, or pauses (STALE) while a signal is
+still `ACTIVE`, a `SIGNAL_PREEMPTION_REVERT` fires immediately regardless
+of position (`reason` reflects why) — a fake signal should never be left
+green because the trip simply stopped sending positions.
+
 ---
 
 ## Status legend
 
 | Tag | Meaning |
 |---|---|
-| **LIVE** | Works against the running backend today (MVP-0 / MVP-1 / MVP-2). |
-| **MVP-3 (future)** | Design not finalized; placeholder so the simulator can plan its device-observer role. |
+| **LIVE** | Works against the running backend today. |
 
-*Last updated: 2026-09-20 (stall detection made two-tier: `STALE` is now
-paused/recoverable, `EXPIRED` is the new terminal status — see C3/C4).
-Owns the boundary only; backend-internal design lives in `docs/HLD.md`
-and `docs/mvp-*/LLD-*.md`.*
+Every wire in this document is now live — MVP-0 through MVP-3 are all
+built and verified end-to-end, including the RabbitMQ device-command
+streams (W7).
+
+*Last updated: 2026-09-20 (MVP-3 shipped: W7a/W7b finalized with real
+message shapes and the `evas.device.commands` topology; added C6 on
+bounded device windows). Owns the boundary only; backend-internal design
+lives in `docs/HLD.md` and `docs/mvp-*/LLD-*.md`.*
