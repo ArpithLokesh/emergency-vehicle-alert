@@ -4,3 +4,7 @@ target/
 .vscode/
 .env
 HELP.md
+
+# Per-developer local config — CORS origins for a local mock frontend vary
+# per machine/port, so this stays untracked rather than shared via git.
+src/main/java/com/evas/configuration/CorsConfig.java
